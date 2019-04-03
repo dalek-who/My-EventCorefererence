@@ -57,10 +57,10 @@ class EcbDocument(object):
         self.category: str = category
         self.path: str = os.path.abspath(os.path.join(os.path.dirname(__file__), DATA_DIR, str(self.topic_id), self.document_name))
         self.all_sentences_dict: dict = {}
-        self.tokens_list: list = []
-        self.components_list: list = []
-        self.instances_list: list = []
-        self.relations_list: list = []
+        self.tokens_dict: dict = dict()
+        self.components_dict: dict = dict()
+        self.instances_dict: dict = dict()
+        self.relations_dict: dict = dict()
 
         # generate properties
         # read xml files
@@ -69,35 +69,36 @@ class EcbDocument(object):
         self.doc_id = root.get("doc_id")
         # get tokens
         tokens = root.findall("token")
-        tokens = [EcbToken(word=token.text,
-                           sentence=int(token.get("sentence")),
-                           tid=int(token.get("t_id")),
-                           number=int(token.get("number")),
-                           mid=None) for token in tokens]
+        tokens = {int(token.get("t_id")): EcbToken(word=token.text,
+                                                   sentence=int(token.get("sentence")),
+                                                   tid=int(token.get("t_id")),
+                                                   number=int(token.get("number")),
+                                                   mid=None)
+                  for token in tokens}
         # get components
         markables = root.find("Markables").getchildren()
-        components = [EcbComponent(tag=mark.tag,
-                                   mid=int(mark.get("m_id")),
-                                   anchor_tid_list=[int(anchor.get("t_id")) for anchor in mark.findall("token_anchor")],
-                                   note=mark.get("note"))
-                      for mark in markables if mark.get("instance_id") is None]
-        instances = [EcbInstance(tag=mark.tag,
-                                 mid=mark.get("m_id"),
-                                 related_to=mark.get("RELATED_TO"),
-                                 description=mark.get("TAG_DESCRIPTOR"),
-                                 iid=mark.get("instance_id"))
-                     for mark in markables if mark.get("instance_id") is not None]
+        components = {int(mark.get("m_id")): EcbComponent(tag=mark.tag,
+                                                          mid=int(mark.get("m_id")),
+                                                          anchor_tid_list=[int(anchor.get("t_id")) for anchor in mark.findall("token_anchor")],
+                                                          note=mark.get("note"))
+                      for mark in markables if mark.get("instance_id") is None}
+        instances = {mark.get("instance_id"): EcbInstance(tag=mark.tag,
+                                                          mid=int(mark.get("m_id")),
+                                                          related_to=mark.get("RELATED_TO"),
+                                                          description=mark.get("TAG_DESCRIPTOR"),
+                                                          iid=mark.get("instance_id"))
+                     for mark in markables if mark.get("instance_id") is not None}
         relations = root.find("Relations").getchildren()
-        relations = [EcbCorefRelation(tag=relation.tag,
-                                      rid=int(relation.get("r_id")),
-                                      note=relation.get("note"),
-                                      sources_mid_list=[int(source.get("m_id")) for source in relation.findall("source")],
-                                      target_mid=int(relation.find("target").get("m_id")))
-                     for relation in relations]
-        self.tokens_list = tokens
-        self.components_list = components
-        self.instances_list = instances
-        self.relations_list = relations
+        relations = {int(relation.get("r_id")): EcbCorefRelation(tag=relation.tag,
+                                                                 rid=int(relation.get("r_id")),
+                                                                 note=relation.get("note"),
+                                                                 sources_mid_list=[int(source.get("m_id")) for source in relation.findall("source")],
+                                                                 target_mid=int(relation.find("target").get("m_id")))
+                     for relation in relations}
+        self.tokens_dict = tokens
+        self.components_dict = components
+        self.instances_dict = instances
+        self.relations_dict = relations
 
 
 class EcbToken(object):
