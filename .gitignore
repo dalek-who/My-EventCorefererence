@@ -7,3 +7,5 @@
 *.iml
 out
 gen
+/test/BERT_test/output/
+.python-version
