@@ -3,6 +3,8 @@ import os
 from collections import defaultdict
 from pandas import read_csv
 import xml.etree.ElementTree as et
+from typing import List, Dict
+from itertools import chain
 
 from preprocessing.Structurize.utils import *
 
@@ -11,10 +13,11 @@ CSV_DIR = ECB_DRI + "ECBplus_coreference_sentences.csv"
 DATA_DIR = ECB_DRI + "ECB+/"
 CSV_ECBplus_coreference_sentences = read_csv(os.path.abspath(os.path.join(os.path.dirname(__file__), CSV_DIR)))
 
+
 class EcbPlusTopView(object):
     """ ECB+数据集最顶层的视角"""
     def __init__(self):
-        self.document_view = None
+        self.document_view = EcbDocumentView()
         self.coreference_view = None
 
 
@@ -57,13 +60,81 @@ class EcbDocument(object):
         self.category: str = category
         self.path: str = os.path.abspath(os.path.join(os.path.dirname(__file__), DATA_DIR, str(self.topic_id), self.document_name))
         self.all_sentences_dict: dict = {}
-        self.tokens_dict: dict = dict()
-        self.components_dict: dict = dict()
-        self.instances_dict: dict = dict()
-        self.relations_dict: dict = dict()
+        self.tokens_dict: dict = self.parse_tokens_dict()
+        self.components_dict: dict = self.parse_components_dict()
+        self.instances_dict: dict = self.parse_instances_dict()
 
         # generate properties
         # read xml files
+        tree = et.parse(source=self.path)
+        root = tree.getroot()
+        self.doc_id = root.get("doc_id")
+
+        # 创建句子，把token添加到对应的句子中
+        tokens_dict = self.tokens_dict
+        tid: int
+        token: EcbToken
+        for tid, token in tokens_dict.items():
+            if self.all_sentences_dict.get(token.sentence) is None:
+                self.all_sentences_dict[token.sentence] = EcbSentence(
+                    document_name=self.document_name, sentence_id=token.sentence)
+            sentence: EcbSentence = self.all_sentences_dict[token.sentence]
+            sentence.tokens_list.append(token)
+            sentence.text = " ".join([token.word for token in sentence.tokens_list])
+
+        # 把component添加到对应句子中
+        components_dict = self.components_dict
+        mid: int
+        component: EcbComponent
+        for mid, component in components_dict.items():
+            component_tokens: List[EcbToken] = [self.tokens_dict[tid] for tid in component.anchor_tid_list]
+            # 把component对应的text添加给每个component
+            text = " ".join([token.word for token in component_tokens])
+            component.text = text
+            # 把component添加到对应句子中
+            # 有一些类型为UNKNOWN的component，其token list是空的
+            if len(component_tokens) > 0:
+                sentence: EcbSentence = self.all_sentences_dict[component_tokens[0].sentence]
+                sentence.components_dict[mid] = component
+
+        # 选取被选择到coreference数据集中的句子
+        Topic = self.topic_id
+        File = self.document_name.rstrip(".xml").split("_")[-1]
+        try:
+            selected_sentence_id = CSV_ECBplus_coreference_sentences.groupby(["Topic", "File"]).get_group((Topic, File))["Sentence Number"]
+            for sid in selected_sentence_id:
+                sentence: EcbSentence = self.all_sentences_dict[sid]
+                sentence.selected = True
+        except KeyError as KE:
+            print("No sentences are selected in this file:", KE)
+
+        # 创建内部聚类簇
+        instances_dict_with_mid_key: dict = {instance.mid: instance for instance in self.instances_dict.values()}
+        relations_dict = self.parse_relations_dict()
+        for rid, relation in relations_dict.items():
+            relation: EcbCorefRelation = relation
+            source_components = [self.components_dict[src_mid] for src_mid in relation.sources_mid_list]
+            instance: EcbInstance = instances_dict_with_mid_key[relation.target_mid]
+            instance.mentions_list += source_components
+
+        # 创建Singleton
+        non_singleton_mid_set = set(chain(*[relation.sources_mid_list for relation in relations_dict.values()]))
+        all_mid_set = set(self.components_dict.keys())
+        singleton_mid_set = all_mid_set - non_singleton_mid_set
+        for i, mid in enumerate(singleton_mid_set):
+            singleton_iid = "Singleton_%s_%s" % (self.document_name, i)
+            component: EcbComponent = self.components_dict[mid]
+            instance: EcbInstance = EcbInstance(tag=component.tag,
+                                                mid=None,
+                                                related_to="",
+                                                description="",
+                                                iid=singleton_iid,
+                                                singleton=True)
+            instance.mentions_list.append(component)
+            self.instances_dict[singleton_iid] = instance
+
+
+    def parse_tokens_dict(self) -> dict:
         tree = et.parse(source=self.path)
         root = tree.getroot()
         self.doc_id = root.get("doc_id")
@@ -75,19 +146,42 @@ class EcbDocument(object):
                                                    number=int(token.get("number")),
                                                    mid=None)
                   for token in tokens}
-        # get components
+        return tokens
+
+    def parse_components_dict(self) -> dict:
+        tree = et.parse(source=self.path)
+        root = tree.getroot()
         markables = root.find("Markables").getchildren()
         components = {int(mark.get("m_id")): EcbComponent(tag=mark.tag,
                                                           mid=int(mark.get("m_id")),
                                                           anchor_tid_list=[int(anchor.get("t_id")) for anchor in mark.findall("token_anchor")],
-                                                          note=mark.get("note"))
-                      for mark in markables if mark.get("instance_id") is None}
-        instances = {mark.get("instance_id"): EcbInstance(tag=mark.tag,
-                                                          mid=int(mark.get("m_id")),
-                                                          related_to=mark.get("RELATED_TO"),
-                                                          description=mark.get("TAG_DESCRIPTOR"),
-                                                          iid=mark.get("instance_id"))
-                     for mark in markables if mark.get("instance_id") is not None}
+                                                          note=mark.get("note"),
+                                                          sentence=None)
+                      for mark in markables if mark.get("RELATED_TO") is None}
+        return components
+
+    def parse_instances_dict(self) -> dict:
+        tree = et.parse(source=self.path)
+        root = tree.getroot()
+        markables = root.find("Markables").getchildren()
+        def get_iid(mark):
+            if mark.get("instance_id") is not None:
+                return mark.get("instance_id")
+            else:
+                return "%s_%s_%s" % (mark.tag, self.document_name, mark.get("m_id"))
+
+        instances = {get_iid(mark): EcbInstance(tag=mark.tag,
+                                                mid=int(mark.get("m_id")),
+                                                related_to=mark.get("RELATED_TO"),
+                                                description=mark.get("TAG_DESCRIPTOR"),
+                                                iid=get_iid(mark),
+                                                singleton=False)
+                     for mark in markables if mark.get("RELATED_TO") is not None}
+        return instances
+
+    def parse_relations_dict(self):
+        tree = et.parse(source=self.path)
+        root = tree.getroot()
         relations = root.find("Relations").getchildren()
         relations = {int(relation.get("r_id")): EcbCorefRelation(tag=relation.tag,
                                                                  rid=int(relation.get("r_id")),
@@ -95,14 +189,29 @@ class EcbDocument(object):
                                                                  sources_mid_list=[int(source.get("m_id")) for source in relation.findall("source")],
                                                                  target_mid=int(relation.find("target").get("m_id")))
                      for relation in relations}
-        self.tokens_dict = tokens
-        self.components_dict = components
-        self.instances_dict = instances
-        self.relations_dict = relations
+        return relations
+
+    def singletons_within(self):
+        # 内部的singleton: 全局singleton+在此document中只有一个component的Instance
+        pass
+
+    def clusters_within(self):
+        # 内部的聚类簇：在此document中有至少两个component的Instance
+        pass
+
+
+class EcbSentence(object):
+    def __init__(self, document_name: str, sentence_id: int):
+        self.document_name: str = document_name
+        self.sentence_id: int = sentence_id
+        self.selected: bool = False
+        self.text: str = None
+        self.tokens_list: List[EcbToken] = []
+        self.components_dict: Dict[int, EcbComponent] = {}
 
 
 class EcbToken(object):
-    def __init__(self, word: str, sentence: int, tid: int, number:int, mid: int=None):
+    def __init__(self, word: str, sentence: int, tid: int, number: int, mid: int=None):
         """
         example:
         <token t_id="49" sentence="1" number="38">Treatment</token>
@@ -115,7 +224,7 @@ class EcbToken(object):
 
 
 class EcbComponent(object):
-    def __init__(self, tag: str, mid: int, anchor_tid_list: list, note: str=None):
+    def __init__(self, tag: str, mid: int, anchor_tid_list: list, note: str=None, sentence: EcbSentence=None):
         # exmple:
         # <HUMAN_PART_ORG m_id="38" note="byCROMER" >  # note might be None
         #     <token_anchor t_id="14"/>
@@ -125,10 +234,12 @@ class EcbComponent(object):
         self.mid: int = mid
         self.note: str = note
         self.anchor_tid_list: list = anchor_tid_list
+        self.text: str = None
+        self.sentence: EcbSentence = sentence
 
 
 class EcbInstance(object):
-    def __init__(self,tag: str, mid:int, related_to: str, description: str, iid: str):
+    def __init__(self, tag: str, mid: int, related_to: str, description: str, iid: str, singleton: bool):
         # example:
         # <ACTION_OCCURRENCE m_id="50" RELATED_TO="" TAG_DESCRIPTOR="t1b_checking_in_promises" instance_id="ACT16236402809085484" />
         self.tag: str = tag
@@ -136,6 +247,8 @@ class EcbInstance(object):
         self.related_to: str = related_to
         self.description: str = description
         self.iid: str = iid
+        self.singleton: bool = singleton
+        self.mentions_list: list = []
 
 
 class EcbCorefRelation(object):
@@ -151,10 +264,6 @@ class EcbCorefRelation(object):
         self.sources_mid_list: list = sources_mid_list
         self.target_mid: int = target_mid
 
-
-class EcbSentence(object):
-    def __init__(self):
-        pass
 
 
 class EcbCluster(object):
