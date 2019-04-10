@@ -3,7 +3,7 @@ from collections import defaultdict
 from preprocessing.Structurize.EcbClass import *
 from pandas import DataFrame, Series
 #%%
-edv = EcbDocumentView()
+ecb = EcbPlusTopView()
 
 #%%
 # 统计每篇文章的句子长度

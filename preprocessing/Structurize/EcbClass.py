@@ -1,7 +1,8 @@
 """ 用于结构化ECB+数据集的类 """
 import os
+import copy
 from collections import defaultdict
-from pandas import read_csv
+from pandas import read_csv, DataFrame
 import xml.etree.ElementTree as et
 from typing import List, Dict
 from itertools import chain
@@ -18,7 +19,12 @@ class EcbPlusTopView(object):
     """ ECB+数据集最顶层的视角"""
     def __init__(self):
         self.document_view = EcbDocumentView()
-        self.coreference_view = None
+        self.coreference_view = EcbCoreferenceView(DodumentView=self.document_view)
+
+    def BERT_MRPC_Data(self, topics: list or str="all", cross_document: bool=True):
+        dataset = []
+        topic_list = self.coreference_view.instance_dict_by_topic.keys() if topics=="all" else topics
+        # todo
 
 
 class EcbDocumentView(object):
@@ -32,8 +38,34 @@ class EcbDocumentView(object):
 
 
 class EcbCoreferenceView(object):
-    def __init__(self):
-        pass
+    def __init__(self, DodumentView: EcbDocumentView):
+        self.instance_dict_by_topic: dict = {}
+        # 产生全局的Coreference簇
+        for tid, topic in DodumentView.topics_dict.items():
+            topic: EcbTopic = topic
+            self.instance_dict_by_topic[tid] = {}
+            for document in topic.documents_dict.values():
+                document: EcbDocument = document
+                for iid, instance in document.instances_dict.items():
+                    if iid not in self.instance_dict_by_topic[tid].keys():
+                        self.instance_dict_by_topic[tid][iid] = copy.copy(instance)
+                        self.instance_dict_by_topic[tid][iid].mentions_list = instance.mentions_list[:]
+                    else:
+                        self.instance_dict_by_topic[tid][iid].mentions_list += instance.mentions_list[:]
+                    self.instance_dict_by_topic[tid][iid].singleton_global = len(self.instance_dict_by_topic[tid][iid].mentions_list) < 2
+                    if len(self.instance_dict_by_topic[tid][iid].mentions_list) == 0:
+                        print("EcbInstance iid=%s, mid=%s has no components" % (self.instance_dict_by_topic[tid][iid].iid, self.instance_dict_by_topic[tid][iid].mid))
+            # for document in topic.documents_dict.values():
+            #     document: EcbDocument = document
+            #     for iid, instance in document.instances_dict.items():
+            #         if iid not in self.instance_dict.keys():
+            #             self.instance_dict[iid] = copy.copy(instance)
+            #             self.instance_dict[iid].mentions_list = instance.mentions_list[:]
+            #         else:
+            #             self.instance_dict[iid].mentions_list += instance.mentions_list[:]
+            #         self.instance_dict[iid].singleton_global = len(self.instance_dict[iid].mentions_list) < 2
+            #         if len(self.instance_dict[iid].mentions_list) == 0:
+            #             print("EcbInstance iid=%s, mid=%s has no components" % (self.instance_dict[iid].iid, self.instance_dict[iid].mid))
 
 
 class EcbTopic(object):
@@ -70,19 +102,19 @@ class EcbDocument(object):
         root = tree.getroot()
         self.doc_id = root.get("doc_id")
 
-        # 创建句子，把token添加到对应的句子中
+        # 创建sentence，把token添加到对应的sentence中,建立sentence与token之间的互相索引
         tokens_dict = self.tokens_dict
-        tid: int
-        token: EcbToken
         for tid, token in tokens_dict.items():
-            if self.all_sentences_dict.get(token.sentence) is None:
-                self.all_sentences_dict[token.sentence] = EcbSentence(
-                    document_name=self.document_name, sentence_id=token.sentence)
-            sentence: EcbSentence = self.all_sentences_dict[token.sentence]
+            token: EcbToken = token
+            if self.all_sentences_dict.get(token.sentence_id) is None:
+                self.all_sentences_dict[token.sentence_id] = EcbSentence(
+                    document_name=self.document_name, sentence_id=token.sentence_id, document=self)
+            sentence: EcbSentence = self.all_sentences_dict[token.sentence_id]
             sentence.tokens_list.append(token)
             sentence.text = " ".join([token.word for token in sentence.tokens_list])
+            token.sentence = sentence  # token到sentence的反向索引
 
-        # 把component添加到对应句子中
+        # 把component添加到对应句子中, 建立sentence与component之间的互相索引
         components_dict = self.components_dict
         mid: int
         component: EcbComponent
@@ -94,8 +126,17 @@ class EcbDocument(object):
             # 把component添加到对应句子中
             # 有一些类型为UNKNOWN的component，其token list是空的
             if len(component_tokens) > 0:
-                sentence: EcbSentence = self.all_sentences_dict[component_tokens[0].sentence]
+                sentence: EcbSentence = self.all_sentences_dict[component_tokens[0].sentence_id]
                 sentence.components_dict[mid] = component
+                component.sentence = sentence  # component到sentence的反向索引
+
+        # 建立token与component之间的互相索引
+        for mid, component in self.components_dict.items():
+            component: EcbComponent = component
+            component.tokens_list: list = [self.tokens_dict[tid] for tid in component.anchor_tid_list]
+            for token in component.tokens_list:
+                token: EcbToken = token
+                token.component = component  # token到component的反向索引
 
         # 选取被选择到coreference数据集中的句子
         Topic = self.topic_id
@@ -108,7 +149,7 @@ class EcbDocument(object):
         except KeyError as KE:
             print("No sentences are selected in this file:", KE)
 
-        # 创建内部聚类簇
+        # 创建内部聚类簇（有些聚类簇在文档内只有一个component，但跨文档不止一个component），建立component与instance互相的索引
         instances_dict_with_mid_key: dict = {instance.mid: instance for instance in self.instances_dict.values()}
         relations_dict = self.parse_relations_dict()
         for rid, relation in relations_dict.items():
@@ -116,8 +157,10 @@ class EcbDocument(object):
             source_components = [self.components_dict[src_mid] for src_mid in relation.sources_mid_list]
             instance: EcbInstance = instances_dict_with_mid_key[relation.target_mid]
             instance.mentions_list += source_components
+            for component in instance.mentions_list:
+                component.instance = instance  # component到instance的反向索引
 
-        # 创建Singleton
+        # 创建全局Singleton，建立component与instance互相的索引
         non_singleton_mid_set = set(chain(*[relation.sources_mid_list for relation in relations_dict.values()]))
         all_mid_set = set(self.components_dict.keys())
         singleton_mid_set = all_mid_set - non_singleton_mid_set
@@ -129,10 +172,18 @@ class EcbDocument(object):
                                                 related_to="",
                                                 description="",
                                                 iid=singleton_iid,
-                                                singleton=True)
+                                                singleton_global=True)
             instance.mentions_list.append(component)
             self.instances_dict[singleton_iid] = instance
+            for component in instance.mentions_list:
+                component.instance = instance  # component到instance的反向索引
 
+        # 识别哪些是文档内singleton
+        for instance in self.instances_dict.values():
+            instance: EcbInstance = instance
+            instance.singleton_within = len(instance.mentions_list) < 2
+            if len(instance.mentions_list)==0:
+                print("EcbInstance iid=%s, mid=%s in %s has no components" % (instance.iid, instance.mid, self.document_name))
 
     def parse_tokens_dict(self) -> dict:
         tree = et.parse(source=self.path)
@@ -141,7 +192,7 @@ class EcbDocument(object):
         # get tokens
         tokens = root.findall("token")
         tokens = {int(token.get("t_id")): EcbToken(word=token.text,
-                                                   sentence=int(token.get("sentence")),
+                                                   sentence_id=int(token.get("sentence")),
                                                    tid=int(token.get("t_id")),
                                                    number=int(token.get("number")),
                                                    mid=None)
@@ -155,8 +206,7 @@ class EcbDocument(object):
         components = {int(mark.get("m_id")): EcbComponent(tag=mark.tag,
                                                           mid=int(mark.get("m_id")),
                                                           anchor_tid_list=[int(anchor.get("t_id")) for anchor in mark.findall("token_anchor")],
-                                                          note=mark.get("note"),
-                                                          sentence=None)
+                                                          note=mark.get("note"))
                       for mark in markables if mark.get("RELATED_TO") is None}
         return components
 
@@ -175,7 +225,7 @@ class EcbDocument(object):
                                                 related_to=mark.get("RELATED_TO"),
                                                 description=mark.get("TAG_DESCRIPTOR"),
                                                 iid=get_iid(mark),
-                                                singleton=False)
+                                                singleton_global=False)
                      for mark in markables if mark.get("RELATED_TO") is not None}
         return instances
 
@@ -201,30 +251,33 @@ class EcbDocument(object):
 
 
 class EcbSentence(object):
-    def __init__(self, document_name: str, sentence_id: int):
+    def __init__(self, document_name: str, sentence_id: int, document: EcbDocument):
         self.document_name: str = document_name
         self.sentence_id: int = sentence_id
         self.selected: bool = False
         self.text: str = None
         self.tokens_list: List[EcbToken] = []
         self.components_dict: Dict[int, EcbComponent] = {}
+        self.document: EcbDocument = document
 
 
 class EcbToken(object):
-    def __init__(self, word: str, sentence: int, tid: int, number: int, mid: int=None):
+    def __init__(self, word: str, sentence_id: int, tid: int, number: int, mid: int=None):
         """
         example:
         <token t_id="49" sentence="1" number="38">Treatment</token>
         """
         self.word: str = word
-        self.sentence: int = sentence
+        self.sentence_id: int = sentence_id
         self.tid: int = tid
         self.number: int = number
         self.mid: int = mid
+        self.component: EcbComponent = None
+        self.sentence: EcbSentence = None
 
 
 class EcbComponent(object):
-    def __init__(self, tag: str, mid: int, anchor_tid_list: list, note: str=None, sentence: EcbSentence=None):
+    def __init__(self, tag: str, mid: int, anchor_tid_list: list, note: str=None):
         # exmple:
         # <HUMAN_PART_ORG m_id="38" note="byCROMER" >  # note might be None
         #     <token_anchor t_id="14"/>
@@ -235,11 +288,13 @@ class EcbComponent(object):
         self.note: str = note
         self.anchor_tid_list: list = anchor_tid_list
         self.text: str = None
-        self.sentence: EcbSentence = sentence
+        self.sentence: EcbSentence = None
+        self.tokens_list: list = []
+        self.instance: EcbInstance = None
 
 
 class EcbInstance(object):
-    def __init__(self, tag: str, mid: int, related_to: str, description: str, iid: str, singleton: bool):
+    def __init__(self, tag: str, mid: int, related_to: str, description: str, iid: str, singleton_global: bool):
         # example:
         # <ACTION_OCCURRENCE m_id="50" RELATED_TO="" TAG_DESCRIPTOR="t1b_checking_in_promises" instance_id="ACT16236402809085484" />
         self.tag: str = tag
@@ -247,7 +302,8 @@ class EcbInstance(object):
         self.related_to: str = related_to
         self.description: str = description
         self.iid: str = iid
-        self.singleton: bool = singleton
+        self.singleton_global: bool = singleton_global  # 是否是全局singleton
+        self.singleton_within: bool = None  # 是否是文档内singleton
         self.mentions_list: list = []
 
 
