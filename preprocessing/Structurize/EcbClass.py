@@ -55,17 +55,13 @@ class EcbCoreferenceView(object):
                     self.instance_dict_by_topic[tid][iid].singleton_global = len(self.instance_dict_by_topic[tid][iid].mentions_list) < 2
                     if len(self.instance_dict_by_topic[tid][iid].mentions_list) == 0:
                         print("EcbInstance iid=%s, mid=%s has no components" % (self.instance_dict_by_topic[tid][iid].iid, self.instance_dict_by_topic[tid][iid].mid))
-            # for document in topic.documents_dict.values():
-            #     document: EcbDocument = document
-            #     for iid, instance in document.instances_dict.items():
-            #         if iid not in self.instance_dict.keys():
-            #             self.instance_dict[iid] = copy.copy(instance)
-            #             self.instance_dict[iid].mentions_list = instance.mentions_list[:]
-            #         else:
-            #             self.instance_dict[iid].mentions_list += instance.mentions_list[:]
-            #         self.instance_dict[iid].singleton_global = len(self.instance_dict[iid].mentions_list) < 2
-            #         if len(self.instance_dict[iid].mentions_list) == 0:
-            #             print("EcbInstance iid=%s, mid=%s has no components" % (self.instance_dict[iid].iid, self.instance_dict[iid].mid))
+        # 建立component到全局instance的反向索引
+        for topic_id, topic in self.instance_dict_by_topic.items():
+            for iid, instance in topic.items():
+                instance: EcbInstance = instance
+                for component in instance.mentions_list:
+                    component: EcbComponent = component
+                    component.instance_global = instance
 
 
 class EcbTopic(object):
@@ -111,7 +107,6 @@ class EcbDocument(object):
                     document_name=self.document_name, sentence_id=token.sentence_id, document=self)
             sentence: EcbSentence = self.all_sentences_dict[token.sentence_id]
             sentence.tokens_list.append(token)
-            sentence.text = " ".join([token.word for token in sentence.tokens_list])
             token.sentence = sentence  # token到sentence的反向索引
 
         # 把component添加到对应句子中, 建立sentence与component之间的互相索引
@@ -149,7 +144,7 @@ class EcbDocument(object):
         except KeyError as KE:
             print("No sentences are selected in this file:", KE)
 
-        # 创建内部聚类簇（有些聚类簇在文档内只有一个component，但跨文档不止一个component），建立component与instance互相的索引
+        # 创建内部聚类簇（有些聚类簇在文档内只有一个component，但跨文档不止一个component），建立component与内部instance互相的索引
         instances_dict_with_mid_key: dict = {instance.mid: instance for instance in self.instances_dict.values()}
         relations_dict = self.parse_relations_dict()
         for rid, relation in relations_dict.items():
@@ -158,7 +153,7 @@ class EcbDocument(object):
             instance: EcbInstance = instances_dict_with_mid_key[relation.target_mid]
             instance.mentions_list += source_components
             for component in instance.mentions_list:
-                component.instance = instance  # component到instance的反向索引
+                component.instance_within = instance  # component到内部instance的反向索引
 
         # 创建全局Singleton，建立component与instance互相的索引
         non_singleton_mid_set = set(chain(*[relation.sources_mid_list for relation in relations_dict.values()]))
@@ -176,7 +171,7 @@ class EcbDocument(object):
             instance.mentions_list.append(component)
             self.instances_dict[singleton_iid] = instance
             for component in instance.mentions_list:
-                component.instance = instance  # component到instance的反向索引
+                component.instance_within = instance  # component到内部instance的反向索引
 
         # 识别哪些是文档内singleton
         for instance in self.instances_dict.values():
@@ -255,10 +250,15 @@ class EcbSentence(object):
         self.document_name: str = document_name
         self.sentence_id: int = sentence_id
         self.selected: bool = False
-        self.text: str = None
         self.tokens_list: List[EcbToken] = []
         self.components_dict: Dict[int, EcbComponent] = {}
         self.document: EcbDocument = document
+
+    def sid(self):
+        return self.document.document_name + "-" + str(self.sentence_id)
+
+    def text(self):
+        return " ".join([token.word for token in self.tokens_list])
 
 
 class EcbToken(object):
@@ -290,7 +290,8 @@ class EcbComponent(object):
         self.text: str = None
         self.sentence: EcbSentence = None
         self.tokens_list: list = []
-        self.instance: EcbInstance = None
+        self.instance_within: EcbInstance = None
+        self.instance_global: EcbInstance = None
 
 
 class EcbInstance(object):

@@ -9,3 +9,7 @@ out
 gen
 /test/BERT_test/output/
 .python-version
+/datasets/
+/predict_result/
+/train_result/
+/test/preprocessing/feature/
