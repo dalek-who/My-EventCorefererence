@@ -18,7 +18,7 @@ class BERT_MRPC_FeatureCreator(object):
                     shuffle: bool=True) -> DataFrame:
         mention_pair_array: np.array = self.mention_pair_creator.generate_mention_pairs(
             topics=topics, cross_document=cross_document, prefix_list=["ACTION", "NEG_ACTION"],
-            ignore_order=True, positive_increase=positive_increase, shuffle=shuffle)
+            ignore_order=True, positive_increase=positive_increase, shuffle=shuffle, by_what="sentence")
         table = DataFrame()
         table["Quality"] = Series([pair.label(cross_document=cross_document) for pair in mention_pair_array])
         table["#1 ID"] = Series([pair.component_pair[0].sentence.sid() for pair in mention_pair_array])

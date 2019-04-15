@@ -7,6 +7,7 @@ from pandas import read_csv, DataFrame
 import xml.etree.ElementTree as et
 from typing import List, Dict
 from itertools import chain
+import spacy
 
 from preprocessing.Structurize.utils import *
 from configs import CONFIG
@@ -16,6 +17,7 @@ CSV_DIR = ECB_DRI + "ECBplus_coreference_sentences.csv"
 DATA_DIR = ECB_DRI + "ECB+/"
 CSV_ECBplus_coreference_sentences = read_csv(CONFIG.CSV_DIR)
 
+spacy_nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
 
 class EcbPlusTopView(object):
     """ ECB+数据集最顶层的视角"""
@@ -111,6 +113,27 @@ class EcbDocument(object):
             sentence.tokens_list.append(token)
             token.sentence = sentence  # token到sentence的反向索引
 
+        # 选取被选择到coreference数据集中的句子
+        Topic = self.topic_id
+        File = self.document_name.rstrip(".xml").split("_")[-1]
+        try:
+            selected_sentence_id = CSV_ECBplus_coreference_sentences.groupby(["Topic", "File"]).get_group((Topic, File))["Sentence Number"]
+            for sid in selected_sentence_id:
+                sentence: EcbSentence = self.all_sentences_dict[sid]
+                sentence.selected = True
+        except KeyError as KE:
+            print("No sentences are selected in this file:", KE)
+
+        # token还原为lemma
+        # for sid, sentence in self.all_sentences_dict.items():
+        #     if not sentence.selected:
+        #         continue
+        #     text = sentence.text().replace('``','"').replace("''", '"')
+        #     for tid, spacy_token in enumerate(spacy_nlp(text)):
+        #         token = sentence.tokens_list[tid]
+        #         token.lemma = spacy_token.lemma_
+        #         token.lemma_id = spacy_token.lemma
+
         # 把component添加到对应句子中, 建立sentence与component之间的互相索引
         components_dict = self.components_dict
         mid: int
@@ -134,17 +157,6 @@ class EcbDocument(object):
             for token in component.tokens_list:
                 token: EcbToken = token
                 token.component = component  # token到component的反向索引
-
-        # 选取被选择到coreference数据集中的句子
-        Topic = self.topic_id
-        File = self.document_name.rstrip(".xml").split("_")[-1]
-        try:
-            selected_sentence_id = CSV_ECBplus_coreference_sentences.groupby(["Topic", "File"]).get_group((Topic, File))["Sentence Number"]
-            for sid in selected_sentence_id:
-                sentence: EcbSentence = self.all_sentences_dict[sid]
-                sentence.selected = True
-        except KeyError as KE:
-            print("No sentences are selected in this file:", KE)
 
         # 创建内部聚类簇（有些聚类簇在文档内只有一个component，但跨文档不止一个component），建立component与内部instance互相的索引
         instances_dict_with_mid_key: dict = {instance.mid: instance for instance in self.instances_dict.values()}
@@ -276,6 +288,8 @@ class EcbToken(object):
         self.mid: int = mid
         self.component: EcbComponent = None
         self.sentence: EcbSentence = None
+        self.lemma: str = None
+        self.lemma_id: int = None
 
 
 class EcbComponent(object):

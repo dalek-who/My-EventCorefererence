@@ -13,3 +13,4 @@ gen
 /predict_result/
 /train_result/
 /test/preprocessing/feature/
+/middle_data/BERT_SentenceMatching/

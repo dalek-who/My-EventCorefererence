@@ -1,4 +1,6 @@
 """ 提取特征"""
+import sys
+sys.path.append("../..")
 import os
 from pandas import DataFrame
 
@@ -22,7 +24,8 @@ topics_train = {
 ECB = EcbPlusTopView()
 MPC = MentionPairCreator(ECB)
 
-to_csv = False
+to_csv = True
+positive_increase = 0
 
 def positive_rate(BERT_feature_table: DataFrame):
     pos_num = len(BERT_feature_table.loc[ BERT_feature_table.loc[:, "Quality"]==1, "Quality"])
@@ -38,7 +41,7 @@ for k, topic_list in topics_train.items():
             os.makedirs(BERT_csv_dir)
         file_name = "train.tsv" if k.startswith("train") else "dev.tsv"
         BERT_csv_path = os.path.join(BERT_csv_dir, file_name)
-        print(file_name)
+        print(BERT_csv_path)
         table = MPC.BERT_MRPC_feature( topics=topic_list, cross_document=cross_document, cross_topic=cross_topic,
-            positive_increase=4, shuffle=True, csv_path=file_name, to_csv=to_csv)
+            positive_increase=positive_increase, shuffle=True, csv_path=BERT_csv_path, to_csv=to_csv)
         print("data number: %s,  positive_rate: %s" % (len(table.index), positive_rate(table)))
