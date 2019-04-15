@@ -1,4 +1,5 @@
 """ 用于结构化ECB+数据集的类 """
+import sys
 import os
 import copy
 from collections import defaultdict
@@ -8,11 +9,12 @@ from typing import List, Dict
 from itertools import chain
 
 from preprocessing.Structurize.utils import *
+from configs import CONFIG
 
 ECB_DRI = "../../datasets/ECB+_LREC2014/"
 CSV_DIR = ECB_DRI + "ECBplus_coreference_sentences.csv"
 DATA_DIR = ECB_DRI + "ECB+/"
-CSV_ECBplus_coreference_sentences = read_csv(os.path.abspath(os.path.join(os.path.dirname(__file__), CSV_DIR)))
+CSV_ECBplus_coreference_sentences = read_csv(CONFIG.CSV_DIR)
 
 
 class EcbPlusTopView(object):
@@ -292,6 +294,9 @@ class EcbComponent(object):
         self.tokens_list: list = []
         self.instance_within: EcbInstance = None
         self.instance_global: EcbInstance = None
+
+    def global_mid(self) -> str:
+        return self.sentence.document.document_name + "-" + str(self.mid)
 
 
 class EcbInstance(object):

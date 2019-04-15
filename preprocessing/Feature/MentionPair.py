@@ -9,14 +9,11 @@ from preprocessing.Structurize.EcbClass import *
 
 class MentionPair(object):
     def __init__(self, mention1: EcbComponent, mention2: EcbComponent, ignore_order: bool=True):
-        self.pair_id: str = ""
         self.component_pair: tuple = (None, None)
-
-        m1_id = mention1.sentence.document.document_name + "-" + str(mention1.mid)
-        m2_id = mention2.sentence.document.document_name + "-" + str(mention2.mid)
+        m1_id = mention1.global_mid()
+        m2_id = mention2.global_mid()
         pair_dict = {m1_id: mention1, m2_id: mention2}
         max_id, min_id = max(m1_id, m2_id), min(m1_id, m2_id)
-        self.pair_id = max_id + min_id if ignore_order else m1_id + m2_id
         self.component_pair = (pair_dict[min_id], pair_dict[max_id]) if ignore_order else (mention1, mention2)
 
     def label(self, cross_document: bool=True) -> 0 or 1:
@@ -25,14 +22,18 @@ class MentionPair(object):
         else:
             return int(self.component_pair[0].instance_within == self.component_pair[1].instance_within)
 
-    def BERT_MRPC_feature(self, cross_document: bool=True):
-        feature = Series()
-        feature["Quality"] = self.label(cross_document=cross_document)
-        feature["#1 ID"] = self.component_pair[0].sentence.sid()
-        feature["#2 ID"] = self.component_pair[1].sentence.sid()
-        feature["#1 String"] = self.component_pair[0].sentence.text()
-        feature["#2 String"] = self.component_pair[1].sentence.text()
-        return feature
+    def pair_id(self,by_what: str="mention"):
+        if by_what=="mention":
+            return self.component_pair[0].global_mid() + "+" +\
+                   self.component_pair[1].global_mid()
+        elif by_what=="sentence":
+            return self.component_pair[0].sentence.sid() + "+" + \
+                   self.component_pair[1].sentence.sid()
+        elif by_what=="document":
+            return self.component_pair[0].sentence.document.document_name + "+" + \
+                   self.component_pair[1].sentence.document.document_name
+        else:
+            raise ValueError("by_what=%s is invalid" % by_what)
 
     def sentences(self, text=True) -> tuple:
         if text:
@@ -53,41 +54,60 @@ class MentionPairCreator(object):
     def __init__(self, ECBPLUS: EcbPlusTopView):
         self.ECBPLUS: EcbPlusTopView = ECBPLUS
 
-    def generate_mention_pairs(self, topics: list or str="all", cross_document: bool=True, prefix_list: list=None,
-                               ignore_order: bool=True, positive_increase: int=0, shuffle: bool=True):
+    def generate_mention_pairs(
+            self,
+            topics: list or str="all",
+            cross_document: bool=True,
+            cross_topic: bool=True,
+            prefix_list: list=None,
+            ignore_order: bool=True,
+            positive_increase: int=0,
+            shuffle: bool=True):
         topics_list = list(self.ECBPLUS.document_view.topics_dict.keys()) if topics == "all" else topics[:]
         mention_pair_dict = dict()
-        # 添加mention-pair
+
+        # 用来添加mention-pair 的函数
+        def add_mention_pair(m1, m2, mention_pair_dict, ignore_order: bool = True):
+            if m1 == m2:
+                return
+            mention_pair = MentionPair(mention1=m1, mention2=m2, ignore_order=ignore_order)
+            if mention_pair.pair_id in mention_pair_dict.keys():
+                pass
+            else:
+                mention_pair_dict[mention_pair.pair_id] = mention_pair
+
+        mentions_all = []  # 所有mention
+        mentions_by_topic = {}  # 每个topic中的mention
+        mentions_by_document = {}  # 每个文档中的mention
+        # 搜出所有mention
         for topic_id in tqdm(topics_list, desc="Generate mention-pair"):
             topic: EcbTopic = self.ECBPLUS.document_view.topics_dict[topic_id]
-            mentions_in_doc_in_topic = []
+            mentions_by_topic[topic_id] = []
             for document in topic.documents_dict.values():
                 document: EcbDocument = document
+                mentions_by_document[document.document_name] = []
                 # 筛选文档中的mention
                 if prefix_list:
                     mentions_in_doc = [comp for comp in document.components_dict.values() if
                                        comp.tag.startswith(tuple(prefix_list))]
                 else:
                     mentions_in_doc = [comp for comp in document.components_dict.values()]
-                mentions_in_doc_in_topic.append(mentions_in_doc)
-            # 用来添加mention-pair
-            def add_mention_pair(m1, m2, mention_pair_dict, ignore_order: bool=True):
-                if m1 == m2:
-                    return
-                mention_pair = MentionPair(mention1=m1, mention2=m2, ignore_order=ignore_order)
-                if mention_pair.pair_id in mention_pair_dict.keys():
-                    pass
-                else:
-                    mention_pair_dict[mention_pair.pair_id] = mention_pair
+                mentions_by_document[document.document_name] = mentions_in_doc
+                mentions_by_topic[topic_id] += mentions_in_doc
+                mentions_all += mentions_in_doc
 
-            if cross_document:  # 文档内
-                for m1, m2 in product(chain(*mentions_in_doc_in_topic), repeat=2):
+        # 生成mention pair
+        if cross_topic:  # 跨document，跨topic
+            for m1, m2 in product(mentions_all, repeat=2):
+                add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order)
+        elif cross_document:  # 跨document，不跨topic
+            for mentions_in_topic in mentions_by_topic.values():
+                for m1, m2 in product(mentions_in_topic, repeat=2):
                     add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order)
-            else:  # 文档间
-                for mentions_in_doc in mentions_in_doc_in_topic:
-                    for m1, m2 in product(mentions_in_doc, repeat=2):
-                        add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order)
-
+        else:  # document内
+            for mentions_in_doc in mentions_by_document.values():
+                for m1, m2 in product(mentions_in_doc, repeat=2):
+                    add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order)
         result = list(mention_pair_dict.values())
 
         # 扩增正例
@@ -100,3 +120,33 @@ class MentionPairCreator(object):
         if shuffle:
             np.random.shuffle(result)
         return result
+
+    def BERT_MRPC_feature(
+            self,
+            topics: str = "all",
+            cross_document: bool = True,
+            cross_topic: bool = True,
+            positive_increase: int=0,
+            shuffle: bool=True,
+            csv_path: str="",
+            to_csv: bool=True) -> DataFrame:
+        mention_pair_array: np.array = self.generate_mention_pairs(
+            topics=topics, cross_document=cross_document, cross_topic=cross_topic, prefix_list=["ACTION", "NEG_ACTION"],
+            ignore_order=True, positive_increase=positive_increase, shuffle=shuffle)
+        table = DataFrame(columns=["Quality", "#1 ID", "#2 ID", "#1 String", "#2 String"])
+        for pair in mention_pair_array:
+            pair: MentionPair = pair
+            if table.empty \
+                    or pair.pair_id(by_what="sentence") not in table.index \
+                    or table.loc[pair.pair_id(by_what="sentence"), "Quality"] == 0 and pair.label(cross_document=cross_document)==1:
+                new_data = Series({
+                    "Quality": pair.label(cross_document=cross_document),
+                    "#1 ID": pair.component_pair[0].sentence.sid(),
+                    "#2 ID": pair.component_pair[1].sentence.sid(),
+                    "#1 String": pair.component_pair[0].sentence.text(),
+                    "#2 String": pair.component_pair[1].sentence.text(),
+                })
+                table.loc[pair.pair_id(), :] = new_data
+        if to_csv:
+            table.to_csv(csv_path, sep="\t", index=False)
+        return table
