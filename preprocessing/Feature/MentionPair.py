@@ -89,7 +89,7 @@ class MentionPairCreator(object):
         mentions_by_topic = {}  # 每个topic中的mention
         mentions_by_document = {}  # 每个文档中的mention
         # 搜出所有mention
-        for topic_id in tqdm(topics_list, desc="Generate mention-pair"):
+        for topic_id in topics_list:
             try:
                 topic: EcbTopic = self.ECBPLUS.document_view.topics_dict[topic_id]
             except KeyError:
@@ -111,14 +111,14 @@ class MentionPairCreator(object):
 
         # 生成mention pair
         if cross_topic:  # 跨document，跨topic
-            for m1, m2 in product(mentions_all, repeat=2):
+            for m1, m2 in tqdm(product(mentions_all, repeat=2), desc="Generate mention-pair [cross topic]:"):
                 add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
         elif cross_document:  # 跨document，不跨topic
-            for mentions_in_topic in mentions_by_topic.values():
+            for mentions_in_topic in tqdm(mentions_by_topic.values(), desc="Generate mention-pair [cross document]:"):
                 for m1, m2 in product(mentions_in_topic, repeat=2):
                     add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
         else:  # document内
-            for mentions_in_doc in mentions_by_document.values():
+            for mentions_in_doc in tqdm(mentions_by_document.values(), desc="Generate mention-pair [within document]:"):
                 for m1, m2 in product(mentions_in_doc, repeat=2):
                     add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
         result = list(mention_pair_dict.values())

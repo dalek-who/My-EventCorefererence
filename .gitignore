@@ -14,3 +14,4 @@ gen
 /train_result/
 /test/preprocessing/feature/
 /middle_data/BERT_SentenceMatching/
+/start_jupyter.sh

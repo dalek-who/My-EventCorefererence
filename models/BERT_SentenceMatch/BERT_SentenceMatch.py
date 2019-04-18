@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import sys
+sys.path.append("..")
 sys.path.append("../..")
 
 import numpy as np
@@ -34,7 +35,7 @@ from tqdm import tqdm, trange
 
 from torch.nn import CrossEntropyLoss, MSELoss
 from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import matthews_corrcoef, f1_score
+from sklearn.metrics import matthews_corrcoef, f1_score, precision_score, recall_score
 from pandas import DataFrame, Series, read_csv
 
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
@@ -43,6 +44,7 @@ from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
 from configs import CONFIG
+from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -531,6 +533,20 @@ def acc_and_f1(preds, labels):
     }
 
 
+def acc_and_f1_and_p_and_r(preds, labels):
+    acc = simple_accuracy(preds, labels)
+    f1 = f1_score(y_true=labels, y_pred=preds)
+    p = precision_score(y_true=labels, y_pred=preds)
+    r = recall_score(y_true=labels, y_pred=preds)
+    return {
+        "precision": p,
+        "recall": r,
+        "acc": acc,
+        "f1": f1,
+        "acc_and_f1": (acc + f1) / 2,
+    }
+
+
 def pearson_and_spearman(preds, labels):
     pearson_corr = pearsonr(preds, labels)[0]
     spearman_corr = spearmanr(preds, labels)[0]
@@ -548,7 +564,7 @@ def compute_metrics(task_name, preds, labels):
     elif task_name == "sst-2":
         return {"acc": simple_accuracy(preds, labels)}
     elif task_name == "mrpc":
-        return acc_and_f1(preds, labels)
+        return acc_and_f1_and_p_and_r(preds, labels)
     elif task_name == "sts-b":
         return pearson_and_spearman(preds, labels)
     elif task_name == "qqp":
@@ -567,15 +583,122 @@ def compute_metrics(task_name, preds, labels):
         raise KeyError(task_name)
 
 
+def store_model_to_checkpoint(model, output_checkpoint_dir):
+    model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+    output_model_file = os.path.join(output_checkpoint_dir, WEIGHTS_NAME)
+    torch.save(model_to_save.state_dict(), output_model_file)
+    output_config_file = os.path.join(output_checkpoint_dir, CONFIG_NAME)
+    with open(output_config_file, 'w') as f:
+        f.write(model_to_save.config.to_json_string())
+    logger.info("Store checkpoint: model parameters to %s" % output_model_file)
+
+
+def load_model_from_checkpoint(load_checkpoint_dir, num_labels):
+    load_model_file = os.path.join(load_checkpoint_dir, WEIGHTS_NAME)
+    load_config_file = os.path.join(load_checkpoint_dir, CONFIG_NAME)
+    config = BertConfig(load_config_file)
+    model = BertForSequenceClassification(config, num_labels=num_labels)
+    model.load_state_dict(torch.load(load_model_file))
+    logger.info("Load checkpoint: model parameters from %s" % load_model_file)
+    return model
+
+
+def dataset_statistic(examples: list):
+    """
+    统计数据集的一些情况
+    :param examples: 数据列表
+    :return: 统计得到的字典
+    """
+    stat_result = dict()
+    stat_result["data_number"] = len(examples)  # 数据数量
+    stat_result["pos_example_number"] = len([ex for ex in examples if int(ex.label)==1])  # 正例数量
+    stat_result["pos_rate"] = stat_result["pos_example_number"] / stat_result["data_number"]  # 正例比例
+    stat_result["neg_example_number"] = stat_result["data_number"] - stat_result["pos_example_number"]
+    stat_result["neg_rate"] = 1 - stat_result["pos_rate"]
+    return stat_result
+
+def dataset_increase(examples: list, more: int, label: int=1):
+    """
+    扩增数据，解决正负例不平衡
+    :param examples: 数据列表
+    :param more: 对指定的label，再增加几倍的数据
+    :param label: 需要扩增的例子的label
+    :return: 扩增后的数据
+    """
+    sub_example = [ex for ex in examples if int(ex.label)==label]
+    if more>=1:
+        return examples + sub_example * more
+    return examples
+
+def do_eval(task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps, global_step, device):
+    logger.info("***** Running evaluation *****")
+    logger.info("  Num examples = %d", len(eval_examples))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+
+    if output_mode == "classification":
+        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+    elif output_mode == "regression":
+        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
+
+    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    # Run prediction for full data
+    eval_sampler = SequentialSampler(eval_data)  # 按顺序依次采样
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+    model.eval()
+    eval_loss = 0
+    nb_eval_steps = 0
+    preds = []
+
+    for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+        input_ids = input_ids.to(device)
+        input_mask = input_mask.to(device)
+        segment_ids = segment_ids.to(device)
+        label_ids = label_ids.to(device)
+
+        with torch.no_grad():
+            logits = model(input_ids, segment_ids, input_mask, labels=None)
+
+        # create eval loss and other metric required by the task
+        if output_mode == "classification":
+            loss_fct = CrossEntropyLoss()
+            tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
+        elif output_mode == "regression":
+            loss_fct = MSELoss()
+            tmp_eval_loss = loss_fct(logits.view(-1), label_ids.view(-1))
+
+        eval_loss += tmp_eval_loss.mean().item()
+        nb_eval_steps += 1
+        if len(preds) == 0:
+            preds.append(logits.detach().cpu().numpy())
+        else:
+            preds[0] = np.append(
+                preds[0], logits.detach().cpu().numpy(), axis=0)
+
+    eval_loss = eval_loss / nb_eval_steps
+    preds = preds[0]
+    likelihood = preds.copy()
+    if output_mode == "classification":
+        preds = np.argmax(preds, axis=1)
+    elif output_mode == "regression":
+        preds = np.squeeze(preds)
+    result = compute_metrics(task_name, preds, all_label_ids.numpy())
+    loss = tr_loss / nb_tr_steps if args.do_train else None
+
+    result['eval_loss'] = eval_loss
+    result['global_step'] = global_step
+    result['loss'] = loss
+
+    return result, preds, likelihood
+
+
 def main():
     parser = argparse.ArgumentParser()
 
     ## Required parameters
-    parser.add_argument("--data_dir",
-                        default=None,
-                        type=str,
-                        required=True,
-                        help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
     parser.add_argument("--bert_model", default=None, type=str, required=True,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                              "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
@@ -585,12 +708,6 @@ def main():
                         type=str,
                         required=True,
                         help="The name of the task to train.")
-    parser.add_argument("--output_dir",
-                        default=None,
-                        type=str,
-                        required=True,
-                        help="The output directory where the model predictions and checkpoints will be written.")
-
     ## Other parameters
     parser.add_argument("--cache_dir",
                         default="",
@@ -667,10 +784,37 @@ def main():
                         default="",
                         type=str,
                         help="Directory where do you want to load the fine-turned model parameters")
-    parser.add_argument("--predict_dir",
+    parser.add_argument("--predict_output_dir",
                         default="",
                         type=str,
                         help="Directory where do you want to store the predict result")
+    parser.add_argument("--train_output_dir",
+                        default="",
+                        type=str,
+                        help="The output directory for train where the model predictions and checkpoints will be written.")
+    parser.add_argument("--coref_level",
+                        required=True,
+                        type=str,
+                        help="Which level's coreference, could be 'within_document', 'cross_document', 'cross_topic'")
+    parser.add_argument("--description",
+                        default="",
+                        type=str,
+                        help="Description of this experiment")
+    parser.add_argument("--eval_data_dir",
+                        default="",
+                        type=str,
+                        help="The input data dir for evaluate. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--train_data_dir",
+                        default="",
+                        type=str,
+                        help="The input data dir for train. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--increase_positive",
+                        default=0,
+                        type=int,
+                        help="How many times positive examples should be increased.")
+    parser.add_argument("--draw_visdom",
+                        action="store_true",
+                        help="Weather to use visdom to draw.")
     args = parser.parse_args()
 
     if args.server_ip and args.server_port:
@@ -732,10 +876,15 @@ def main():
     if not args.do_train and not args.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train:
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    if os.path.exists(args.train_output_dir) and os.listdir(args.train_output_dir) and args.do_train:
+        raise ValueError("Train output directory ({}) already exists and is not empty.".format(args.train_output_dir))
+    if args.do_train and not os.path.exists(args.train_output_dir):
+        os.makedirs(args.train_output_dir)
+
+    if os.path.exists(args.predict_output_dir) and os.listdir(args.predict_output_dir) and args.do_eval:
+        raise ValueError("Predict output directory ({}) already exists and is not empty.".format(args.train_output_dir))
+    if args.do_eval and not os.path.exists(args.predict_output_dir):
+        os.makedirs(args.predict_output_dir)
 
     task_name = args.task_name.lower()
 
@@ -753,7 +902,9 @@ def main():
     train_examples = None
     num_train_optimization_steps = None
     if args.do_train:
-        train_examples = processor.get_train_examples(args.data_dir)
+        train_examples = processor.get_train_examples(args.train_data_dir)
+        if args.increase_positive >= 1:  # 扩增正例
+            train_examples = dataset_increase(examples=train_examples, more=args.increase_positive, label=1)
         num_train_optimization_steps = int(
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
         if args.local_rank != -1:
@@ -809,6 +960,13 @@ def main():
                              warmup=args.warmup_proportion,
                              t_total=num_train_optimization_steps)
 
+    # 测试数据
+    eval_examples = processor.get_dev_examples(args.eval_data_dir)
+    eval_features = convert_examples_to_features(
+        eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
+
+    time_stamp = get_time_stamp()
+    visdom_helper = VisdomHelper(env="train BERT Sentence Matching: "+time_stamp, enable=args.draw_visdom)
     global_step = 0
     nb_tr_steps = 0
     tr_loss = 0
@@ -836,10 +994,16 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+        # visdom展示此次训练的命令行参数和训练数据统计
+        train_examples_stat = dataset_statistic(examples=train_examples)
+        visdom_helper.show_dict(text_name="args", dic=vars(args))
+        visdom_helper.show_dict(text_name="train dataset statistics", dic=train_examples_stat)
+        train_round = -1
+        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+                train_round += 1
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, label_ids = batch
 
@@ -866,6 +1030,41 @@ def main():
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
+                # train loss图
+                # 每个batch画一个
+                visdom_helper.update_line(line_name="train_loss", round=train_round, value=loss.item())
+                visdom_helper.update_scatter(line_name="train_loss_scatter", round=train_round, value=loss.item())
+                # 每n个batch画一个
+                visdom_helper.update_line_average(line_name="train_loss_average-6", round=train_round,
+                                                  value=loss.item(), buf_size=6)
+                visdom_helper.update_line_average(line_name="train_loss_average-5", round=train_round,
+                                                  value=loss.item(), buf_size=5)
+                visdom_helper.update_line_average(line_name="train_loss_average-10", round=train_round,
+                                                  value=loss.item(), buf_size=10)
+                visdom_helper.update_line_average(line_name="train_loss_average-11", round=train_round,
+                                                  value=loss.item(), buf_size=11)
+                visdom_helper.update_line_average(line_name="train_loss_average-50", round=train_round,
+                                                  value=loss.item(), buf_size=50)
+                visdom_helper.update_line_average(line_name="train_loss_average-100", round=train_round,
+                                                  value=loss.item(), buf_size=100)
+                # 每n个点做平滑
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-3", round=train_round,
+                                                 value=loss.item(), buf_size=3)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-6", round=train_round,
+                                                 value=loss.item(), buf_size=6)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-5", round=train_round,
+                                                 value=loss.item(), buf_size=5)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-10", round=train_round,
+                                                 value=loss.item(), buf_size=10)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-11", round=train_round,
+                                                 value=loss.item(), buf_size=11)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-50", round=train_round,
+                                                 value=loss.item(), buf_size=50)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-100", round=train_round,
+                                                 value=loss.item(), buf_size=100)
+                visdom_helper.update_line_smooth(line_name="train_loss_smooth-3", round=train_round,
+                                                 value=loss.item(), buf_size=3)
+
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16:
                         # modify learning rate with special warm up BERT uses
@@ -877,127 +1076,158 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
+                    current_lr = optimizer.param_groups[0]["lr"]  # 当前的学习率
+                    visdom_helper.update_line(line_name="learning rate", round=train_round, value=current_lr)
+            # 评估模型, 画eval曲线图
+            result, preds, likelihood = do_eval(task_name, args, eval_examples, eval_features, model, output_mode, num_labels,
+                                                tr_loss, nb_tr_steps, global_step, device)
+            visdom_helper.update_line(line_name="eval_acc", round=epoch, value=result["acc"])
+            visdom_helper.update_line(line_name="eval_f1", round=epoch, value=result["f1"])
+            visdom_helper.update_line(line_name="eval_loss", round=epoch, value=result["eval_loss"])
+
+
 
         # Save a trained model and the associated configuration
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        output_model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
-        torch.save(model_to_save.state_dict(), output_model_file)
-        output_config_file = os.path.join(args.output_dir, CONFIG_NAME)
-        with open(output_config_file, 'w') as f:
-            f.write(model_to_save.config.to_json_string())
+        store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
 
         # Load a trained model and config that you have fine-tuned
-        config = BertConfig(output_config_file)
-        model = BertForSequenceClassification(config, num_labels=num_labels)
-        model.load_state_dict(torch.load(output_model_file))
+        model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=num_labels)
+
+        # 实验记录
+        generate_record(
+            table_name="train_BERT",
+            coref_level=args.coref_level,
+            input_data_path=os.path.join(args.train_data_dir, "train.tsv"),
+            model_parameter_path=args.train_output_dir,
+            args_dict=vars(args),
+            time_stamp=time_stamp)
 
     elif args.load_trained:
         # Load a trained model and config that you have fine-tuned
-        load_model_file = os.path.join(args.load_model_dir, WEIGHTS_NAME)
-        load_config_file = os.path.join(args.load_model_dir, CONFIG_NAME)
-        config = BertConfig(load_config_file)
-        model = BertForSequenceClassification(config, num_labels=num_labels)
-        model.load_state_dict(torch.load(load_model_file))
-        logger.info("Load model parameters from %s" % load_model_file)
+        model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=num_labels)
     else:
         model = BertForSequenceClassification.from_pretrained(args.bert_model, num_labels=num_labels)
     model.to(device)
 
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        eval_examples = processor.get_dev_examples(args.data_dir)
-        #eval_examples = processor.get_dev_examples(os.path.abspath(os.path.join(os.path.dirname(__file__), args.data_dir)))
-        eval_features = convert_examples_to_features(
-            eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
-        logger.info("***** Running evaluation *****")
-        logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", args.eval_batch_size)
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+        # logger.info("***** Running evaluation *****")
+        # logger.info("  Num examples = %d", len(eval_examples))
+        # logger.info("  Batch size = %d", args.eval_batch_size)
+        # all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+        # all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+        # all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+        #
+        # if output_mode == "classification":
+        #     all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+        # elif output_mode == "regression":
+        #     all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
+        #
+        # eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+        # # Run prediction for full data
+        # eval_sampler = SequentialSampler(eval_data)  # 按顺序依次采样
+        # eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+        #
+        # model.eval()
+        # eval_loss = 0
+        # nb_eval_steps = 0
+        # preds = []
+        #
+        # for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+        #     input_ids = input_ids.to(device)
+        #     input_mask = input_mask.to(device)
+        #     segment_ids = segment_ids.to(device)
+        #     label_ids = label_ids.to(device)
+        #
+        #     with torch.no_grad():
+        #         logits = model(input_ids, segment_ids, input_mask, labels=None)
+        #
+        #     # create eval loss and other metric required by the task
+        #     if output_mode == "classification":
+        #         loss_fct = CrossEntropyLoss()
+        #         tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
+        #     elif output_mode == "regression":
+        #         loss_fct = MSELoss()
+        #         tmp_eval_loss = loss_fct(logits.view(-1), label_ids.view(-1))
+        #
+        #     eval_loss += tmp_eval_loss.mean().item()
+        #     nb_eval_steps += 1
+        #     if len(preds) == 0:
+        #         preds.append(logits.detach().cpu().numpy())
+        #     else:
+        #         preds[0] = np.append(
+        #             preds[0], logits.detach().cpu().numpy(), axis=0)
+        #
+        # eval_loss = eval_loss / nb_eval_steps
+        # preds = preds[0]
+        # likelihood = preds.copy()
+        # if output_mode == "classification":
+        #     preds = np.argmax(preds, axis=1)
+        # elif output_mode == "regression":
+        #     preds = np.squeeze(preds)
+        # result = compute_metrics(task_name, preds, all_label_ids.numpy())
+        # loss = tr_loss / nb_tr_steps if args.do_train else None
+        #
+        # result['eval_loss'] = eval_loss
+        # result['global_step'] = global_step
+        # result['loss'] = loss
 
-        if output_mode == "classification":
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-        elif output_mode == "regression":
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
+        result, preds, likelihood = do_eval(task_name, args, eval_examples, eval_features, model, output_mode,
+                                            num_labels, tr_loss, nb_tr_steps, global_step, device)
+        if args.do_train:
+            train_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
+            with open(train_eval_file, "w") as writer:
+                logger.info("***** Eval results *****")
+                for key in sorted(result.keys()):
+                    logger.info("  %s = %s", key, str(result[key]))
+                    writer.write("%s = %s\n" % (key, str(result[key])))
+        # 绘制eval结果
+        eval_examples_stat = dataset_statistic(eval_examples)
+        visdom_helper.show_dict(text_name="eval", dic=result)
+        visdom_helper.show_dict(text_name="eval dataset statistics", dic=eval_examples_stat)
 
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-        # Run prediction for full data
-        eval_sampler = SequentialSampler(eval_data)  # 按顺序依次采样
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-        model.eval()
-        eval_loss = 0
-        nb_eval_steps = 0
-        preds = []
+        # # 存储预测结果
+        # dev_data_csv = read_csv(os.path.join(args.eval_data_dir, "dev.tsv"), sep="\t", quoting=csv.QUOTE_NONE)
+        # predict_result = dev_data_csv.loc[:, ["#1 ID", "#2 ID"]]
+        # predict_result["# 0 likelihood"] = Series(likelihood[:, 0])
+        # predict_result["# 1 likelihood"] = Series(likelihood[:, 1])
+        # predict_result["# pred label"] = Series(preds)
+        # output_pred_file = os.path.join(args.predict_output_dir, CONFIG.BERT_PREDICT_FILE_NAME)
+        # if not os.path.exists(args.predict_output_dir):
+        #     os.makedirs(args.predict_output_dir)
+        # predict_result.to_csv(output_pred_file, sep="\t", index=False)
+        #
+        # predict_eval_file = os.path.join(args.predict_output_dir, "eval_results.txt")
+        # with open(predict_eval_file, "w") as writer:
+        #     logger.info("***** Eval results *****")
+        #     for key in sorted(result.keys()):
+        #         logger.info("  %s = %s", key, str(result[key]))
+        #         writer.write("%s = %s\n" % (key, str(result[key])))
 
-        for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-            input_ids = input_ids.to(device)
-            input_mask = input_mask.to(device)
-            segment_ids = segment_ids.to(device)
-            label_ids = label_ids.to(device)
-
-            with torch.no_grad():
-                logits = model(input_ids, segment_ids, input_mask, labels=None)
-
-            # create eval loss and other metric required by the task
-            if output_mode == "classification":
-                loss_fct = CrossEntropyLoss()
-                tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
-            elif output_mode == "regression":
-                loss_fct = MSELoss()
-                tmp_eval_loss = loss_fct(logits.view(-1), label_ids.view(-1))
-
-            eval_loss += tmp_eval_loss.mean().item()
-            nb_eval_steps += 1
-            if len(preds) == 0:
-                preds.append(logits.detach().cpu().numpy())
-            else:
-                preds[0] = np.append(
-                    preds[0], logits.detach().cpu().numpy(), axis=0)
-
-        eval_loss = eval_loss / nb_eval_steps
-        preds = preds[0]
-        likelihood = preds.copy()
-        if output_mode == "classification":
-            preds = np.argmax(preds, axis=1)
-        elif output_mode == "regression":
-            preds = np.squeeze(preds)
-        result = compute_metrics(task_name, preds, all_label_ids.numpy())
-        loss = tr_loss / nb_tr_steps if args.do_train else None
-
-        result['eval_loss'] = eval_loss
-        result['global_step'] = global_step
-        result['loss'] = loss
-
-        output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-        with open(output_eval_file, "w") as writer:
-            logger.info("***** Eval results *****")
-            for key in sorted(result.keys()):
-                logger.info("  %s = %s", key, str(result[key]))
-                writer.write("%s = %s\n" % (key, str(result[key])))
-
-        # 存储预测结果
-        dev_data_csv = read_csv(os.path.join(args.data_dir, "dev.tsv"), sep="\t", quoting=csv.QUOTE_NONE)
-        predict_result = dev_data_csv.loc[:, ["#1 ID", "#2 ID"]]
-        predict_result["# 0 likelihood"] = Series(likelihood[:, 0])
-        predict_result["# 1 likelihood"] = Series(likelihood[:, 1])
-        predict_result["# pred label"] = Series(preds)
-        output_pred_file = os.path.join(args.predict_dir, CONFIG.BERT_PREDICT_FILE_NAME)
-        if not os.path.exists(args.predict_dir):
-            os.makedirs(args.predict_dir)
-        predict_result.to_csv(output_pred_file, sep="\t", index=False)
+        # 实验记录
+        model_parameter_path = args.train_output_dir if args.do_train else args.load_model_dir
+        generate_record(
+            table_name="test_BERT",
+            coref_level=args.coref_level,
+            input_data_path=os.path.join(args.eval_data_dir, "dev.tsv"),
+            model_parameter_path= model_parameter_path,
+            output_evaluate_dir=args.predict_output_dir,
+            args_dict=vars(args),
+            eval_result_dict=result,
+            time_stamp=time_stamp
+        )
 
         # hack for MNLI-MM
         if task_name == "mnli":
             task_name = "mnli-mm"
             processor = processors[task_name]()
 
-            if os.path.exists(args.output_dir + '-MM') and os.listdir(args.output_dir + '-MM') and args.do_train:
-                raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
-            if not os.path.exists(args.output_dir + '-MM'):
-                os.makedirs(args.output_dir + '-MM')
+            if os.path.exists(args.train_output_dir + '-MM') and os.listdir(args.train_output_dir + '-MM') and args.do_train:
+                raise ValueError("Output directory ({}) already exists and is not empty.".format(args.train_output_dir))
+            if not os.path.exists(args.train_output_dir + '-MM'):
+                os.makedirs(args.train_output_dir + '-MM')
 
-            eval_examples = processor.get_dev_examples(args.data_dir)
+            eval_examples = processor.get_dev_examples(args.eval_data_dir)
             eval_features = convert_examples_to_features(
                 eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
             logger.info("***** Running evaluation *****")
@@ -1048,7 +1278,7 @@ def main():
             result['global_step'] = global_step
             result['loss'] = loss
 
-            output_eval_file = os.path.join(args.output_dir + '-MM', "eval_results.txt")
+            output_eval_file = os.path.join(args.train_output_dir + '-MM', "eval_results.txt")
             with open(output_eval_file, "w") as writer:
                 logger.info("***** Eval results *****")
                 for key in sorted(result.keys()):
