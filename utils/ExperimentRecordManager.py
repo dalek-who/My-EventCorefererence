@@ -128,6 +128,14 @@ class VisdomHelper(object):
             )
 
     def update_line_average(self, line_name: str, round: int, value: float, buf_size: int):
+        """
+        每调用此函数buf_size次画一个点，该点的值是buf_size个点的平均
+        :param line_name: 线名
+        :param round: 第几次调用此函数
+        :param value: 此次的值
+        :param buf_size: 存储有待于平均的点的buffer长度
+        :return: None
+        """
         if not self.enable:
             return
         if self.win.get(line_name) is None:
@@ -150,6 +158,17 @@ class VisdomHelper(object):
             buf.clear()
 
     def update_line_smooth(self, line_name: str, round: int, value: float, buf_size: int):
+        """
+        每次画这个点以及前buf_size个点的平均值进行平滑
+        与update_line_average的区别是update_line_average每buf_size次才画一个点，
+        而update_line_smooth每次都会画一个平滑后的点
+        :param line_name: 线名
+        :param round: 第几次调用此函数
+        :param value: 此次的值
+        :param buf_size: 存储有待于平均的点的buffer长度
+        :return: None
+        """
+
         if not self.enable:
             return
         if self.win.get(line_name) is None:
@@ -162,6 +181,26 @@ class VisdomHelper(object):
         if self.smooth_buffer_dict.get(buf_id) is None:
             self.smooth_buffer_dict[buf_id] = deque(maxlen=buf_size)
         buf = self.smooth_buffer_dict[buf_id]
+        buf.append(value)
+        self.viz.line(
+            X=np.array([round]),
+            Y=np.array([np.average(buf)]),
+            win=self.win[line_name],
+            update='append')
+
+    def update_line_total_average(self, line_name: str, round: int, value: float):
+        if not self.enable:
+            return
+        if self.win.get(line_name) is None:
+            self.win[line_name] = self.viz.line(
+                X=np.array([0]),
+                Y=np.array([0]),
+                opts=dict(title=line_name)
+            )
+        buf_id = line_name
+        if self.average_buffer_dict.get(buf_id) is None:
+            self.average_buffer_dict[buf_id] = deque()
+        buf = self.average_buffer_dict[buf_id]
         buf.append(value)
         self.viz.line(
             X=np.array([round]),

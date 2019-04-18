@@ -612,7 +612,7 @@ def dataset_statistic(examples: list):
     stat_result = dict()
     stat_result["data_number"] = len(examples)  # 数据数量
     stat_result["pos_example_number"] = len([ex for ex in examples if int(ex.label)==1])  # 正例数量
-    stat_result["pos_rate"] = stat_result["pos_example_number"] / stat_result["data_number"]  # 正例比例
+    stat_result["pos_rate"] = 0 if stat_result["data_number"]==0 else stat_result["pos_example_number"] / stat_result["data_number"]  # 正例比例
     stat_result["neg_example_number"] = stat_result["data_number"] - stat_result["pos_example_number"]
     stat_result["neg_rate"] = 1 - stat_result["pos_rate"]
     return stat_result
@@ -725,6 +725,9 @@ def main():
     parser.add_argument("--do_eval",
                         action='store_true',
                         help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_predict",
+                        action='store_true',
+                        help="Whether to run predict on the dev set.")
     parser.add_argument("--do_lower_case",
                         action='store_true',
                         help="Set this flag if you are using an uncased model.")
@@ -873,8 +876,8 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_eval:
-        raise ValueError("At least one of `do_train` or `do_eval` must be True.")
+    if not args.do_train and not args.do_predict:
+        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
 
     if os.path.exists(args.train_output_dir) and os.listdir(args.train_output_dir) and args.do_train:
         raise ValueError("Train output directory ({}) already exists and is not empty.".format(args.train_output_dir))
@@ -883,7 +886,7 @@ def main():
 
     if os.path.exists(args.predict_output_dir) and os.listdir(args.predict_output_dir) and args.do_eval:
         raise ValueError("Predict output directory ({}) already exists and is not empty.".format(args.train_output_dir))
-    if args.do_eval and not os.path.exists(args.predict_output_dir):
+    if args.do_predict and not os.path.exists(args.predict_output_dir):
         os.makedirs(args.predict_output_dir)
 
     task_name = args.task_name.lower()
@@ -999,6 +1002,15 @@ def main():
         visdom_helper.show_dict(text_name="args", dic=vars(args))
         visdom_helper.show_dict(text_name="train dataset statistics", dic=train_examples_stat)
         train_round = -1
+        best_dict = {  # 记录什么时候达到最好结果
+            "best_dev_epoch": 0,
+            "best_dev_acc": -1.,
+
+            "best_train_epoch": 0,
+            "best_train_acc": -1.,
+        }
+        train_evals = dict()
+        dev_evals = dict()
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -1064,7 +1076,9 @@ def main():
                                                  value=loss.item(), buf_size=100)
                 visdom_helper.update_line_smooth(line_name="train_loss_smooth-3", round=train_round,
                                                  value=loss.item(), buf_size=3)
-
+                # 总平均loss变化
+                visdom_helper.update_line_total_average(line_name="train_loss_total_average", round=train_round,
+                                                        value=loss.item())
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16:
                         # modify learning rate with special warm up BERT uses
@@ -1076,19 +1090,42 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
-                    current_lr = optimizer.param_groups[0]["lr"]  # 当前的学习率
+                    current_lr = args.learning_rate * warmup_linear(global_step / num_train_optimization_steps,
+                                                                          args.warmup_proportion)  # 当前的学习率(BertAdam)里会自动完成这步
                     visdom_helper.update_line(line_name="learning rate", round=train_round, value=current_lr)
-            # 评估模型, 画eval曲线图
-            result, preds, likelihood = do_eval(task_name, args, eval_examples, eval_features, model, output_mode, num_labels,
-                                                tr_loss, nb_tr_steps, global_step, device)
-            visdom_helper.update_line(line_name="eval_acc", round=epoch, value=result["acc"])
-            visdom_helper.update_line(line_name="eval_f1", round=epoch, value=result["f1"])
-            visdom_helper.update_line(line_name="eval_loss", round=epoch, value=result["eval_loss"])
 
+            # 评估模型, 画在train集和dev集上的eval曲线图
+            # train集
+            train_result, train_preds, train_likelihood = do_eval(
+                task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
+                global_step, device)
+            visdom_helper.update_line(line_name="train_acc", round=epoch, value=train_result["acc"])
+            visdom_helper.update_line(line_name="train_f1", round=epoch, value=train_result["f1"])
+            visdom_helper.update_line(line_name="loss_on_train_set", round=epoch, value=train_result["eval_loss"])
+            train_evals[epoch] = train_result
+            # dev集
+            dev_result, dev_preds, dev_likelihood = do_eval(
+                task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
+                global_step, device)
+            visdom_helper.update_line(line_name="dev_acc", round=epoch, value=dev_result["acc"])
+            visdom_helper.update_line(line_name="dev_f1", round=epoch, value=dev_result["f1"])
+            visdom_helper.update_line(line_name="loss_on_dev_set", round=epoch, value=dev_result["eval_loss"])
+            dev_evals[epoch] = dev_result
 
-
-        # Save a trained model and the associated configuration
-        store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
+            # 把目前为止在dev上acc最好的模型保存为checkpoint
+            if train_result["acc"] > best_dict["best_train_acc"]:
+                best_dict["best_train_acc"] = train_result["acc"]
+                best_dict["best_train_epoch"] = epoch
+            if dev_result["acc"] > best_dict["best_dev_acc"]:
+                best_dict["best_dev_acc"] = dev_result["acc"]
+                best_dict["best_dev_epoch"] = epoch
+                store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
+                best_dev_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
+                with open(best_dev_eval_file, "w") as writer:
+                    logger.info("*****Best Dev Eval Results, save checkpoint *****")
+                    for key in sorted(dev_result.keys()):
+                        logger.info("  %s = %s", key, str(dev_result[key]))
+                        writer.write("%s = %s\n" % (key, str(dev_result[key])))
 
         # Load a trained model and config that you have fine-tuned
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=num_labels)
@@ -1101,6 +1138,8 @@ def main():
             model_parameter_path=args.train_output_dir,
             args_dict=vars(args),
             time_stamp=time_stamp)
+        visdom_helper.show_dict(text_name="training_log", dic=best_dict)
+        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_epoch"]])
 
     elif args.load_trained:
         # Load a trained model and config that you have fine-tuned
@@ -1109,7 +1148,7 @@ def main():
         model = BertForSequenceClassification.from_pretrained(args.bert_model, num_labels=num_labels)
     model.to(device)
 
-    if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+    if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         # logger.info("***** Running evaluation *****")
         # logger.info("  Num examples = %d", len(eval_examples))
         # logger.info("  Batch size = %d", args.eval_batch_size)
@@ -1182,27 +1221,27 @@ def main():
                     writer.write("%s = %s\n" % (key, str(result[key])))
         # 绘制eval结果
         eval_examples_stat = dataset_statistic(eval_examples)
-        visdom_helper.show_dict(text_name="eval", dic=result)
+        visdom_helper.show_dict(text_name="eval_result", dic=result)
         visdom_helper.show_dict(text_name="eval dataset statistics", dic=eval_examples_stat)
 
 
-        # # 存储预测结果
-        # dev_data_csv = read_csv(os.path.join(args.eval_data_dir, "dev.tsv"), sep="\t", quoting=csv.QUOTE_NONE)
-        # predict_result = dev_data_csv.loc[:, ["#1 ID", "#2 ID"]]
-        # predict_result["# 0 likelihood"] = Series(likelihood[:, 0])
-        # predict_result["# 1 likelihood"] = Series(likelihood[:, 1])
-        # predict_result["# pred label"] = Series(preds)
-        # output_pred_file = os.path.join(args.predict_output_dir, CONFIG.BERT_PREDICT_FILE_NAME)
-        # if not os.path.exists(args.predict_output_dir):
-        #     os.makedirs(args.predict_output_dir)
-        # predict_result.to_csv(output_pred_file, sep="\t", index=False)
-        #
-        # predict_eval_file = os.path.join(args.predict_output_dir, "eval_results.txt")
-        # with open(predict_eval_file, "w") as writer:
-        #     logger.info("***** Eval results *****")
-        #     for key in sorted(result.keys()):
-        #         logger.info("  %s = %s", key, str(result[key]))
-        #         writer.write("%s = %s\n" % (key, str(result[key])))
+        # 存储预测结果
+        dev_data_csv = read_csv(os.path.join(args.eval_data_dir, "dev.tsv"), sep="\t")
+        predict_result = dev_data_csv.loc[:, ["#1 ID", "#2 ID"]]
+        predict_result["# 0 likelihood"] = Series(likelihood[:, 0])
+        predict_result["# 1 likelihood"] = Series(likelihood[:, 1])
+        predict_result["# pred label"] = Series(preds)
+        output_pred_file = os.path.join(args.predict_output_dir, CONFIG.BERT_PREDICT_FILE_NAME)
+        if not os.path.exists(args.predict_output_dir):
+            os.makedirs(args.predict_output_dir)
+        predict_result.to_csv(output_pred_file, sep="\t", index=False)
+
+        predict_eval_file = os.path.join(args.predict_output_dir, "eval_results.txt")
+        with open(predict_eval_file, "w") as writer:
+            logger.info("***** Eval results *****")
+            for key in sorted(result.keys()):
+                logger.info("  %s = %s", key, str(result[key]))
+                writer.write("%s = %s\n" % (key, str(result[key])))
 
         # 实验记录
         model_parameter_path = args.train_output_dir if args.do_train else args.load_model_dir
