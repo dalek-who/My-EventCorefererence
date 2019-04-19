@@ -2,19 +2,19 @@
 
 import os
 
-CUDA_VISIBLE_DEVICES = 0
+CUDA_VISIBLE_DEVICES = "0,1"
 script = "BERT_SentenceMatch.py"
 log_name = "log_run-demo.txt"
 
 args_value = {
     # 会调整的
+    "--description": "this_is_a_toy-cluster",
     "--learning_rate": 5e-6,
     "--max_seq_length": 90,
-    "--train_batch_size": 65,
-    "--eval_batch_size": 40,
+    "--train_batch_size": 128,
+    "--eval_batch_size": 128,
     "--num_train_epochs": 3.0,
     "--coref_level": "cross_document",  # 或者"within_document", "cross_topic"
-    "--description": "this_is_a_toy",
     "--increase_positive": 0,
     # 各种目录
     "--load_model_dir": "",
@@ -49,6 +49,7 @@ args_store_true = {
     "--do_predict": False,
     "--load_trained": False,
     "--draw_visdom": False,
+    "--do_cluster": True,
 
     # 使用默认值
     "--do_lower_case": True,

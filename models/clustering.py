@@ -2,13 +2,20 @@ import networkx as nx
 from pandas import read_csv, DataFrame, Series
 from itertools import product
 from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
-
-#%%
-input_path = "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_predict/train-large_wdoc_wtpc-lr_5e-6-batch_65-epoch_5--test-large_wdoc_wtpc/BERT_predict.tsv"
-input_df = read_csv(input_path, sep="\t")
+import numpy as np
 
 
-def connected_components_clustering(df):
+def examples_to_predict_frame(examples: list, pred: np.array) -> DataFrame:
+    """把example list和一列预测结果转换为DataFrame"""
+    df = DataFrame()
+    df["#1 ID"] = Series([e.id_a for e in examples])
+    df["#2 ID"] = Series([e.id_b for e in examples])
+    df["# pred label"] = Series(pred)
+    return df
+
+
+def connected_components_clustering(df: DataFrame) -> DataFrame:
+    """连通分量聚类"""
     nodes = set(df.loc[:, "#1 ID"].to_list() + df.loc[:, "#2 ID"].to_list())
     links = df.loc[df.loc[:, "# pred label"] == 1, ["#1 ID", "#2 ID"]].to_dict(orient='split')['data']
     G = nx.Graph()
@@ -24,25 +31,30 @@ def connected_components_clustering(df):
     return df_new
 
 
-standard_path = "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input/test-large_wdoc_wtpc/dev.tsv"
-standard_df = read_csv(standard_path, sep="\t")
+#%%
+# input_path = "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_predict/train-large_wdoc_wtpc-lr_5e-6-batch_65-epoch_5--test-large_wdoc_wtpc/BERT_predict.tsv"
+# input_df = read_csv(input_path, sep="\t")
 
-print("before clustering:")
-result = dict()
-df = input_df
-result["acc"] = accuracy_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["p"] = precision_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["r"] = recall_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["f1"] = f1_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-for k, v in result.items():
-    print(f"{k}: {v}")
 
-print("after clustering:")
-result = dict()
-df = connected_components_clustering(input_df)
-result["acc"] = accuracy_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["p"] = precision_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["r"] = recall_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-result["f1"] = f1_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
-for k, v in result.items():
-    print(f"{k}: {v}")
+# standard_path = "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input/test-large_wdoc_wtpc/dev.tsv"
+# standard_df = read_csv(standard_path, sep="\t")
+#
+# print("before clustering:")
+# result = dict()
+# df = input_df
+# result["acc"] = accuracy_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["p"] = precision_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["r"] = recall_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["f1"] = f1_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# for k, v in result.items():
+#     print(f"{k}: {v}")
+#
+# print("after clustering:")
+# result = dict()
+# df = connected_components_clustering(input_df)
+# result["acc"] = accuracy_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["p"] = precision_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["r"] = recall_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# result["f1"] = f1_score(y_true=standard_df["Quality"], y_pred=df["# pred label"])
+# for k, v in result.items():
+#     print(f"{k}: {v}")

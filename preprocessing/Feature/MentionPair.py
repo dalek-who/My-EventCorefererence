@@ -74,7 +74,7 @@ class MentionPairCreator(object):
 
         # 用来添加mention-pair 的函数
         def add_mention_pair(m1, m2, mention_pair_dict, ignore_order: bool = True, by_what: str="mention"):
-            if m1 == m2:
+            if by_what=="sentence" and m1.sentence.text() == m2.sentence.text():
                 return
             mention_pair = MentionPair(mention1=m1, mention2=m2, ignore_order=ignore_order)
             if mention_pair.pair_id(by_what=by_what) in mention_pair_dict.keys():

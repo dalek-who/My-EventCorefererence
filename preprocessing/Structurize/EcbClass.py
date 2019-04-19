@@ -313,6 +313,7 @@ class EcbComponent(object):
         return self.sentence.document.document_name + "-" + str(self.mid)
 
 
+
 class EcbInstance(object):
     def __init__(self, tag: str, mid: int, related_to: str, description: str, iid: str, singleton_global: bool):
         # example:

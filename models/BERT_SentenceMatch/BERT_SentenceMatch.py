@@ -45,6 +45,7 @@ from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
 from configs import CONFIG
 from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
+from models.clustering import connected_components_clustering, examples_to_predict_frame
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
 
-    def __init__(self, guid, text_a, text_b=None, label=None):
+    def __init__(self, guid, text_a, text_b=None, label=None, id_a=None, id_b=None):
         """Constructs a InputExample.
         Args:
             guid: Unique id for the example.
@@ -70,6 +71,8 @@ class InputExample(object):
         self.text_a = text_a
         self.text_b = text_b
         self.label = label
+        self.id_a = id_a
+        self.id_b = id_b
 
 
 class InputFeatures(object):
@@ -137,9 +140,11 @@ class MrpcProcessor(DataProcessor):
             guid = "%s-%s" % (set_type, i)
             text_a = line[3]
             text_b = line[4]
+            id_a = line[1]
+            id_b = line[2]
             label = line[0]
             examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label, id_a=id_a, id_b=id_b))
         return examples
 
 
@@ -603,7 +608,7 @@ def load_model_from_checkpoint(load_checkpoint_dir, num_labels):
     return model
 
 
-def dataset_statistic(examples: list):
+def dataset_statistic(examples):
     """
     统计数据集的一些情况
     :param examples: 数据列表
@@ -693,6 +698,18 @@ def do_eval(task_name, args, eval_examples, eval_features, model, output_mode, n
     result['loss'] = loss
 
     return result, preds, likelihood
+
+
+def do_eval_cluster(task_name, eval_examples, preds, return_df=False):
+    true_example_label = np.array([int(e.label) for e in eval_examples])
+    pred_frame = examples_to_predict_frame(eval_examples, preds)
+    cluster_frame = connected_components_clustering(pred_frame)
+    cluster_preds = cluster_frame["# pred label"].astype(int).to_numpy()
+    cluster_result = compute_metrics(task_name, cluster_preds, true_example_label)
+    if return_df:
+        return cluster_result, cluster_preds, cluster_frame
+    else:
+        return cluster_result, cluster_preds
 
 
 def main():
@@ -818,6 +835,9 @@ def main():
     parser.add_argument("--draw_visdom",
                         action="store_true",
                         help="Weather to use visdom to draw.")
+    parser.add_argument("--do_cluster",
+                        action="store_true",
+                        help="Weather to do graph connection component cluster.")
     args = parser.parse_args()
 
     if args.server_ip and args.server_port:
@@ -1008,9 +1028,17 @@ def main():
 
             "best_train_epoch": 0,
             "best_train_acc": -1.,
+
+            "best_dev_epoch_cluster": 0,
+            "best_dev_acc_cluster": -1.,
+
+            "best_train_epoch_cluster": 0,
+            "best_train_acc_cluster": -1.,
         }
         train_evals = dict()
         dev_evals = dict()
+        train_cluster_evals = dict()
+        dev_cluster_evals = dict()
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -1099,37 +1127,59 @@ def main():
             train_result, train_preds, train_likelihood = do_eval(
                 task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
                 global_step, device)
+            train_cluster_result, train_cluster_preds = do_eval_cluster(task_name, train_examples, train_preds)
             visdom_helper.update_line(line_name="train_acc", round=epoch, value=train_result["acc"])
             visdom_helper.update_line(line_name="train_f1", round=epoch, value=train_result["f1"])
             visdom_helper.update_line(line_name="loss_on_train_set", round=epoch, value=train_result["eval_loss"])
+            visdom_helper.update_line(line_name="train_acc_cluster", round=epoch, value=train_cluster_result["acc"])
+            visdom_helper.update_line(line_name="train_f1_cluster", round=epoch, value=train_cluster_result["f1"])
             train_evals[epoch] = train_result
+            train_cluster_evals[epoch] = train_cluster_result
             # dev集
             dev_result, dev_preds, dev_likelihood = do_eval(
                 task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
                 global_step, device)
+            dev_cluster_result, dev_cluster_preds = do_eval_cluster(task_name, eval_examples, dev_preds)
             visdom_helper.update_line(line_name="dev_acc", round=epoch, value=dev_result["acc"])
             visdom_helper.update_line(line_name="dev_f1", round=epoch, value=dev_result["f1"])
             visdom_helper.update_line(line_name="loss_on_dev_set", round=epoch, value=dev_result["eval_loss"])
+            visdom_helper.update_line(line_name="dev_acc_cluster", round=epoch, value=dev_cluster_result["acc"])
+            visdom_helper.update_line(line_name="dev_f1_cluster", round=epoch, value=dev_cluster_result["f1"])
             dev_evals[epoch] = dev_result
+            dev_cluster_evals[epoch] = dev_cluster_result
 
             # 把目前为止在dev上acc最好的模型保存为checkpoint
             if train_result["acc"] > best_dict["best_train_acc"]:
                 best_dict["best_train_acc"] = train_result["acc"]
                 best_dict["best_train_epoch"] = epoch
+            if train_cluster_result["acc"] > best_dict["best_train_acc_cluster"]:
+                best_dict["best_train_acc_cluster"] = train_cluster_result["acc"]
+                best_dict["best_train_epoch_cluster"] = epoch
+            if dev_cluster_result["acc"] > best_dict["best_dev_acc_cluster"]:
+                best_dict["best_dev_acc_cluster"] = dev_cluster_result["acc"]
+                best_dict["best_dev_epoch_cluster"] = epoch
+            # 依据dev acc保存checkpoint
             if dev_result["acc"] > best_dict["best_dev_acc"]:
                 best_dict["best_dev_acc"] = dev_result["acc"]
                 best_dict["best_dev_epoch"] = epoch
                 store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
+                # 分类评测
                 best_dev_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
                 with open(best_dev_eval_file, "w") as writer:
                     logger.info("*****Best Dev Eval Results, save checkpoint *****")
                     for key in sorted(dev_result.keys()):
                         logger.info("  %s = %s", key, str(dev_result[key]))
                         writer.write("%s = %s\n" % (key, str(dev_result[key])))
+                    for key in sorted(dev_cluster_result.keys()):
+                        logger.info("  cluster %s = %s", key, str(dev_cluster_result[key]))
+                        writer.write("cluster %s = %s\n" % (key, str(dev_cluster_result[key])))
 
         # Load a trained model and config that you have fine-tuned
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=num_labels)
 
+        visdom_helper.show_dict(text_name="training_log", dic=best_dict)
+        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_epoch"]])
+        visdom_helper.show_dict(text_name="best_dev_eval_result_cluster", dic=dev_cluster_evals[best_dict["best_dev_epoch_cluster"]])
         # 实验记录
         generate_record(
             table_name="train_BERT",
@@ -1138,8 +1188,6 @@ def main():
             model_parameter_path=args.train_output_dir,
             args_dict=vars(args),
             time_stamp=time_stamp)
-        visdom_helper.show_dict(text_name="training_log", dic=best_dict)
-        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_epoch"]])
 
     elif args.load_trained:
         # Load a trained model and config that you have fine-tuned
@@ -1212,16 +1260,18 @@ def main():
 
         result, preds, likelihood = do_eval(task_name, args, eval_examples, eval_features, model, output_mode,
                                             num_labels, tr_loss, nb_tr_steps, global_step, device)
-        if args.do_train:
-            train_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
-            with open(train_eval_file, "w") as writer:
-                logger.info("***** Eval results *****")
-                for key in sorted(result.keys()):
-                    logger.info("  %s = %s", key, str(result[key]))
-                    writer.write("%s = %s\n" % (key, str(result[key])))
+        result_cluster, preds_cluster, cluster_frame = do_eval_cluster(task_name, eval_examples, preds, return_df=True)
+        # if args.do_train:
+        #     train_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
+        #     with open(train_eval_file, "w") as writer:
+        #         logger.info("***** Eval results *****")
+        #         for key in sorted(result.keys()):
+        #             logger.info("  %s = %s", key, str(result[key]))
+        #             writer.write("%s = %s\n" % (key, str(result[key])))
         # 绘制eval结果
         eval_examples_stat = dataset_statistic(eval_examples)
         visdom_helper.show_dict(text_name="eval_result", dic=result)
+        visdom_helper.show_dict(text_name="eval_result_cluster", dic=result_cluster)
         visdom_helper.show_dict(text_name="eval dataset statistics", dic=eval_examples_stat)
 
 
@@ -1235,6 +1285,8 @@ def main():
         if not os.path.exists(args.predict_output_dir):
             os.makedirs(args.predict_output_dir)
         predict_result.to_csv(output_pred_file, sep="\t", index=False)
+        output_pred_file_cluster = os.path.join(args.predict_output_dir, "BERT_predict_cluster.tsv")
+        cluster_frame.to_csv(output_pred_file_cluster, sep="\t", index=False)
 
         predict_eval_file = os.path.join(args.predict_output_dir, "eval_results.txt")
         with open(predict_eval_file, "w") as writer:
@@ -1242,6 +1294,10 @@ def main():
             for key in sorted(result.keys()):
                 logger.info("  %s = %s", key, str(result[key]))
                 writer.write("%s = %s\n" % (key, str(result[key])))
+            for key in sorted(result_cluster.keys()):
+                logger.info("  cluster %s = %s", key, str(result_cluster[key]))
+                writer.write("cluster %s = %s\n" % (key, str(result_cluster[key])))
+
 
         # 实验记录
         model_parameter_path = args.train_output_dir if args.do_train else args.load_model_dir
