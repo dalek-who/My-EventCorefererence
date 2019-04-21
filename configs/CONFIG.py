@@ -10,3 +10,5 @@ EXPERIMENT_RECOED_DIR = os.path.abspath(os.path.join(__file__, "../../Experiment
 ECB_DRI = os.path.abspath(os.path.join(__file__, "../../datasets/ECB+_LREC2014/"))
 CSV_DIR =  os.path.join(ECB_DRI, "ECBplus_coreference_sentences.csv")
 DATA_DIR = os.path.join(ECB_DRI, "ECB+/")
+
+DRAW_ACC_THRESHOLD = 0.7

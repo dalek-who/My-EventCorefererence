@@ -1,0 +1,20 @@
+neleval测评coreference的方法：
+neleval evaluate -m all-coref -m pairwise_negative:None:kbid -f 'tab' -g gold.combined.tsv tac_system.combined.tsv > eval.tsv
+
+gold.combined.tsv: 正确结果
+tac_system.combined.tsv: 预测结果
+
+文件格式：
+（文件里没有表头）
+# mention id  # 起始字符的offset  # 终止字符的offset  # coreference簇id  # confidence  # 类型
+AFP_ENG_20100120.0809	0	0	NIL456789112	1.0	EVENT
+
+注1：gold与system的 起始字符的offset、终止字符的offset全写0即可
+注2：coreference簇id都要以NIL开头
+neleval本来是用来测实体链接（nel）的，簇id有两种形式，一种是kb_XXX，一种是NILXXX。
+kb_XXX是聚类并且链接到指定知识库节点，不仅要求聚类正确并且簇id也必须正确
+NILXXX是聚类但不连接到知识库，只要正确聚类到一个簇里就可以，和簇id无关
+所以在event coreference任务中要用NIL作为开头簇id开头
+
+注3：confidence都写1.0即可
+注4：类型：都写EVENT

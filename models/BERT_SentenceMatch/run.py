@@ -1,29 +1,29 @@
 import os
 
-CUDA_VISIBLE_DEVICES = "0,1"
+CUDA_VISIBLE_DEVICES = "0,1,2,3"
 script = "BERT_SentenceMatch.py"
 log_name = "log_run.txt"
 
 args_value = {
     # 会调整的
-    "--description": "within_document,train_topic_1-35,lr_5e-6,batch_65,epoch_5,fix_the_bug_data_of_same_string_but_label_0",
-    "--coref_level": "within_document",  # "cross_document", "within_document", "cross_topic"
+    "--description": "cross_document,draw_CoNLL_and_AVG_each_epoch",
+    "--coref_level": "cross_document",  # "cross_document", "within_document", "cross_topic"
     "--learning_rate": 5e-6,
     "--max_seq_length": 90,
-    "--train_batch_size": 128,
-    "--eval_batch_size": 128,
-    "--num_train_epochs": 5.0,
+    "--train_batch_size": 180,
+    "--eval_batch_size": 180,
+    "--num_train_epochs": 3.0,
     "--increase_positive": 0,
     # 各种目录
     "--load_model_dir": "",
     "--predict_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_predict/train-large_wdoc_wtpc_fix-lr_5e-6-batch_65-epoch_5-cluster--test-large_wdoc_wtpc",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_predict/train-large_cdoc_wtpc_fix-draw_CoNLL",
     "--train_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_model/train-large_wdoc_wtpc_fix-lr_5e-6-batch_65-cluster",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_model/train-large_cdoc_wtpc_fix-draw_CoNLL",
     "--eval_data_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input_fix/test-large_wdoc_wtpc",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input_fix/test-large_cdoc_wtpc",
     "--train_data_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input_fix/train-large_wdoc_wtpc",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/BERT_SentenceMatching_input_fix/train-large_cdoc_wtpc",
 
     # 基本不变的
     "--bert_model": "bert-base-uncased",

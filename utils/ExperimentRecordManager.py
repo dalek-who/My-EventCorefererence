@@ -87,15 +87,17 @@ class VisdomHelper(object):
             return
         if self.win.get(line_name) is None:
             self.win[line_name] = self.viz.line(
-                X=np.array([0]),
-                Y=np.array([0]),
+                X=np.array([round]),
+                Y=np.array([value]),
                 opts=dict(title=line_name)
             )
-        self.viz.line(
-            X=np.array([round]),
-            Y=np.array([value]),
-            win=self.win[line_name],  # win要保持一致
-            update='append')
+            return
+        else:
+            self.viz.line(
+                X=np.array([round]),
+                Y=np.array([value]),
+                win=self.win[line_name],  # win要保持一致
+                update='append')
 
     def update_scatter(self, line_name: str, round: int, value: float):
         if not self.enable:

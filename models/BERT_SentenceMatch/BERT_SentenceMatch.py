@@ -45,6 +45,7 @@ from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
 from configs import CONFIG
 from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
+from utils.coref_eval import evaluate_coref_from_example
 from models.clustering import connected_components_clustering, examples_to_predict_frame
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -691,12 +692,14 @@ def do_eval(task_name, args, eval_examples, eval_features, model, output_mode, n
     elif output_mode == "regression":
         preds = np.squeeze(preds)
     result = compute_metrics(task_name, preds, all_label_ids.numpy())
-    loss = tr_loss / nb_tr_steps if args.do_train else None
+    loss = None if not args.do_train or nb_tr_steps==0 else tr_loss / nb_tr_steps
 
     result['eval_loss'] = eval_loss
     result['global_step'] = global_step
     result['loss'] = loss
-
+    # coref result
+    coref_eval_result = evaluate_coref_from_example(eval_examples, preds)
+    result = dict(result, **coref_eval_result)
     return result, preds, likelihood
 
 
@@ -989,7 +992,7 @@ def main():
         eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
 
     time_stamp = get_time_stamp()
-    visdom_helper = VisdomHelper(env="train BERT Sentence Matching: "+time_stamp, enable=args.draw_visdom)
+    visdom_helper = VisdomHelper(env=f"train BERT Sentence Matching: {time_stamp} {args.description}", enable=args.draw_visdom)
     global_step = 0
     nb_tr_steps = 0
     tr_loss = 0
@@ -1021,7 +1024,6 @@ def main():
         train_examples_stat = dataset_statistic(examples=train_examples)
         visdom_helper.show_dict(text_name="args", dic=vars(args))
         visdom_helper.show_dict(text_name="train dataset statistics", dic=train_examples_stat)
-        train_round = -1
         best_dict = {  # 记录什么时候达到最好结果
             "best_dev_epoch": 0,
             "best_dev_acc": -1.,
@@ -1034,11 +1036,75 @@ def main():
 
             "best_train_epoch_cluster": 0,
             "best_train_acc_cluster": -1.,
+
+            "best_dev_BLANC_f1_epoch": 0,
+            "best_dev_BLANC_f1": -1,
         }
+        # 开始训练前先画一个acc点
+        train_round = -1
+        epoch = -1
+        train_result, train_preds, train_likelihood = do_eval(
+            task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss,
+            nb_tr_steps,
+            global_step, device)
+        visdom_helper.update_line(line_name="train_acc_epoch", round=epoch, value=train_result["acc"])
+        visdom_helper.update_line(line_name="train_f1_epoch", round=epoch, value=train_result["f1"])
+        visdom_helper.update_line(line_name="loss_on_train_set_epoch", round=epoch, value=train_result["eval_loss"])
+        visdom_helper.update_line(line_name="train_B-cubed_f1_epoch", round=epoch, value=train_result["B-cubed_f1"])
+        visdom_helper.update_line(line_name="train_MUC_f1_epoch", round=epoch, value=train_result["MUC_f1"])
+        visdom_helper.update_line(line_name="train_CEAFe_f1_epoch", round=epoch, value=train_result["CEAFe_f1"])
+        visdom_helper.update_line(line_name="train_CEAFm_f1_epoch", round=epoch, value=train_result["CEAFm_f1"])
+        visdom_helper.update_line(line_name="train_BLANCc_f1_epoch", round=epoch, value=train_result["BLANCc_f1"])
+        visdom_helper.update_line(line_name="train_BLANCn_f1_epoch", round=epoch, value=train_result["BLANCn_f1"])
+        visdom_helper.update_line(line_name="train_BLANC_f1_epoch", round=epoch, value=train_result["BLANC_f1"])
+        visdom_helper.update_line(line_name="train_CoNLL_f1_epoch", round=epoch, value=train_result["CoNLL_f1"])
+        visdom_helper.update_line(line_name="train_AVG_f1_epoch", round=epoch, value=train_result["AVG_f1"])
+
+
+        # visdom_helper.update_line(line_name="train_acc_step", round=train_round, value=train_result["acc"])
+        # visdom_helper.update_line(line_name="train_f1_step", round=train_round, value=train_result["f1"])
+        # visdom_helper.update_line(line_name="loss_on_train_set_step", round=train_round, value=train_result["eval_loss"])
+        # visdom_helper.update_line(line_name="train_B-cubed_f1_step", round=train_round, value=train_result["B-cubed_f1"])
+        # visdom_helper.update_line(line_name="train_MUC_f1_step", round=train_round, value=train_result["MUC_f1"])
+        # visdom_helper.update_line(line_name="train_CEAFe_f1_step", round=train_round, value=train_result["CEAFe_f1"])
+        # visdom_helper.update_line(line_name="train_CEAFm_f1_step", round=train_round, value=train_result["CEAFm_f1"])
+        # visdom_helper.update_line(line_name="train_BLANC_f1_step", round=train_round, value=train_result["BLANC_f1"])
+
+        # dev集
+        dev_result, dev_preds, dev_likelihood = do_eval(
+            task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss,
+            nb_tr_steps,
+            global_step, device)
+        visdom_helper.update_line(line_name="dev_acc_epoch", round=epoch, value=dev_result["acc"])
+        visdom_helper.update_line(line_name="dev_f1_epoch", round=epoch, value=dev_result["f1"])
+        visdom_helper.update_line(line_name="loss_on_dev_set_epoch", round=epoch, value=dev_result["eval_loss"])
+        visdom_helper.update_line(line_name="dev_B-cubed_f1_epoch", round=epoch, value=dev_result["B-cubed_f1"])
+        visdom_helper.update_line(line_name="dev_MUC_f1_epoch", round=epoch, value=dev_result["MUC_f1"])
+        visdom_helper.update_line(line_name="dev_CEAFe_f1_epoch", round=epoch, value=dev_result["CEAFe_f1"])
+        visdom_helper.update_line(line_name="dev_CEAFm_f1_epoch", round=epoch, value=dev_result["CEAFm_f1"])
+        visdom_helper.update_line(line_name="dev_BLANCc_f1_epoch", round=epoch, value=dev_result["BLANCc_f1"])
+        visdom_helper.update_line(line_name="dev_BLANCn_f1_epoch", round=epoch, value=dev_result["BLANCn_f1"])
+        visdom_helper.update_line(line_name="dev_BLANC_f1_epoch", round=epoch, value=dev_result["BLANC_f1"])
+        visdom_helper.update_line(line_name="dev_CoNLL_f1_epoch", round=epoch, value=dev_result["CoNLL_f1"])
+        visdom_helper.update_line(line_name="dev_AVG_f1_epoch", round=epoch, value=dev_result["AVG_f1"])
+
+        # visdom_helper.update_line(line_name="dev_acc_step", round=train_round, value=dev_result["acc"])
+        # visdom_helper.update_line(line_name="dev_f1_step", round=train_round, value=dev_result["f1"])
+        # visdom_helper.update_line(line_name="loss_on_dev_set_step", round=train_round, value=dev_result["eval_loss"])
+        # visdom_helper.update_line(line_name="dev_B-cubed_f1_step", round=train_round, value=dev_result["B-cubed_f1"])
+        # visdom_helper.update_line(line_name="dev_MUC_f1_step", round=train_round, value=dev_result["MUC_f1"])
+        # visdom_helper.update_line(line_name="dev_CEAFe_f1_step", round=train_round, value=dev_result["CEAFe_f1"])
+        # visdom_helper.update_line(line_name="dev_CEAFm_f1_step", round=train_round, value=dev_result["CEAFm_f1"])
+        # visdom_helper.update_line(line_name="dev_BLANC_f1_step", round=train_round, value=dev_result["BLANC_f1"])
+
+        train_round = -1
+        epoch = -1
         train_evals = dict()
         dev_evals = dict()
         train_cluster_evals = dict()
         dev_cluster_evals = dict()
+        draw_acc_each_epoch = False
+        draw_acc_steps = num_train_optimization_steps / 100
         for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -1122,17 +1188,72 @@ def main():
                                                                           args.warmup_proportion)  # 当前的学习率(BertAdam)里会自动完成这步
                     visdom_helper.update_line(line_name="learning rate", round=train_round, value=current_lr)
 
+                    # 训练中画acc曲线
+                    # if not draw_acc_each_epoch and train_round % draw_acc_steps==0 or step == len(train_dataloader)-1:
+                    #     train_result, train_preds, train_likelihood = do_eval(
+                    #         task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss,
+                    #         nb_tr_steps,
+                    #         global_step, device)
+                    #     visdom_helper.update_line(line_name="train_acc_step", round=train_round, value=train_result["acc"])
+                    #     visdom_helper.update_line(line_name="train_f1_step", round=train_round, value=train_result["f1"])
+                    #     visdom_helper.update_line(line_name="loss_on_train_set_step", round=train_round,
+                    #                               value=train_result["eval_loss"])
+                    #     visdom_helper.update_line(line_name="train_B-cubed_f1_step", round=train_round,
+                    #                               value=train_result["B-cubed_f1"])
+                    #     visdom_helper.update_line(line_name="train_MUC_f1_step", round=train_round,
+                    #                               value=train_result["MUC_f1"])
+                    #     visdom_helper.update_line(line_name="train_CEAFe_f1_step", round=train_round,
+                    #                               value=train_result["CEAFe_f1"])
+                    #     visdom_helper.update_line(line_name="train_CEAFm_f1_step", round=train_round,
+                    #                               value=train_result["CEAFm_f1"])
+                    #     visdom_helper.update_line(line_name="train_BLANC_f1_step", round=train_round,
+                    #                               value=train_result["BLANC_f1"])
+                    #
+                    #     # dev集
+                    #     dev_result, dev_preds, dev_likelihood = do_eval(
+                    #         task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss,
+                    #         nb_tr_steps,
+                    #         global_step, device)
+                    #     visdom_helper.update_line(line_name="dev_acc_step", round=train_round, value=dev_result["acc"])
+                    #     visdom_helper.update_line(line_name="dev_f1_step", round=train_round, value=dev_result["f1"])
+                    #     visdom_helper.update_line(line_name="loss_on_dev_set_step", round=train_round,
+                    #                               value=dev_result["eval_loss"])
+                    #     visdom_helper.update_line(line_name="dev_B-cubed_f1_step", round=train_round,
+                    #                               value=dev_result["B-cubed_f1"])
+                    #     visdom_helper.update_line(line_name="dev_MUC_f1_step", round=train_round,
+                    #                               value=dev_result["MUC_f1"])
+                    #     visdom_helper.update_line(line_name="dev_CEAFe_f1_step", round=train_round,
+                    #                               value=dev_result["CEAFe_f1"])
+                    #     visdom_helper.update_line(line_name="dev_CEAFm_f1_step", round=train_round,
+                    #                               value=dev_result["CEAFm_f1"])
+                    #     visdom_helper.update_line(line_name="dev_BLANC_f1_step", round=train_round,
+                    #                               value=dev_result["BLANC_f1"])
+                    #
+                    #     # 为防止因为总是测试导致训练过慢，当dev acc高于一个阈值后就只每个epoch画一个
+                    #     if dev_result["acc"] >= CONFIG.DRAW_ACC_THRESHOLD:
+                    #         draw_acc_each_epoch = True
+
             # 评估模型, 画在train集和dev集上的eval曲线图
             # train集
             train_result, train_preds, train_likelihood = do_eval(
                 task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
                 global_step, device)
             train_cluster_result, train_cluster_preds = do_eval_cluster(task_name, train_examples, train_preds)
-            visdom_helper.update_line(line_name="train_acc", round=epoch, value=train_result["acc"])
-            visdom_helper.update_line(line_name="train_f1", round=epoch, value=train_result["f1"])
-            visdom_helper.update_line(line_name="loss_on_train_set", round=epoch, value=train_result["eval_loss"])
-            visdom_helper.update_line(line_name="train_acc_cluster", round=epoch, value=train_cluster_result["acc"])
-            visdom_helper.update_line(line_name="train_f1_cluster", round=epoch, value=train_cluster_result["f1"])
+            visdom_helper.update_line(line_name="train_acc_epoch", round=epoch, value=train_result["acc"])
+            visdom_helper.update_line(line_name="train_f1_epoch", round=epoch, value=train_result["f1"])
+            visdom_helper.update_line(line_name="loss_on_train_set_epoch", round=epoch, value=train_result["eval_loss"])
+            visdom_helper.update_line(line_name="train_acc_cluster_epoch", round=epoch, value=train_cluster_result["acc"])
+            visdom_helper.update_line(line_name="train_f1_cluster_epoch", round=epoch, value=train_cluster_result["f1"])
+            visdom_helper.update_line(line_name="train_B-cubed_f1_epoch", round=epoch, value=train_result["B-cubed_f1"])
+            visdom_helper.update_line(line_name="train_MUC_f1_epoch", round=epoch, value=train_result["MUC_f1"])
+            visdom_helper.update_line(line_name="train_CEAFe_f1_epoch", round=epoch, value=train_result["CEAFe_f1"])
+            visdom_helper.update_line(line_name="train_CEAFm_f1_epoch", round=epoch, value=train_result["CEAFm_f1"])
+            visdom_helper.update_line(line_name="train_BLANCc_f1_epoch", round=epoch, value=train_result["BLANCc_f1"])
+            visdom_helper.update_line(line_name="train_BLANCn_f1_epoch", round=epoch, value=train_result["BLANCn_f1"])
+            visdom_helper.update_line(line_name="train_BLANC_f1_epoch", round=epoch, value=train_result["BLANC_f1"])
+            visdom_helper.update_line(line_name="train_CoNLL_f1_epoch", round=epoch, value=train_result["CoNLL_f1"])
+            visdom_helper.update_line(line_name="train_AVG_f1_epoch", round=epoch, value=train_result["AVG_f1"])
+
             train_evals[epoch] = train_result
             train_cluster_evals[epoch] = train_cluster_result
             # dev集
@@ -1140,11 +1261,21 @@ def main():
                 task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
                 global_step, device)
             dev_cluster_result, dev_cluster_preds = do_eval_cluster(task_name, eval_examples, dev_preds)
-            visdom_helper.update_line(line_name="dev_acc", round=epoch, value=dev_result["acc"])
-            visdom_helper.update_line(line_name="dev_f1", round=epoch, value=dev_result["f1"])
-            visdom_helper.update_line(line_name="loss_on_dev_set", round=epoch, value=dev_result["eval_loss"])
-            visdom_helper.update_line(line_name="dev_acc_cluster", round=epoch, value=dev_cluster_result["acc"])
-            visdom_helper.update_line(line_name="dev_f1_cluster", round=epoch, value=dev_cluster_result["f1"])
+            visdom_helper.update_line(line_name="dev_acc_epoch", round=epoch, value=dev_result["acc"])
+            visdom_helper.update_line(line_name="dev_f1_epoch", round=epoch, value=dev_result["f1"])
+            visdom_helper.update_line(line_name="loss_on_dev_set_epoch", round=epoch, value=dev_result["eval_loss"])
+            visdom_helper.update_line(line_name="dev_acc_cluster_epoch", round=epoch, value=dev_cluster_result["acc"])
+            visdom_helper.update_line(line_name="dev_f1_cluster_epoch", round=epoch, value=dev_cluster_result["f1"])
+            visdom_helper.update_line(line_name="dev_B-cubed_f1_epoch", round=epoch, value=dev_result["B-cubed_f1"])
+            visdom_helper.update_line(line_name="dev_MUC_f1_epoch", round=epoch, value=dev_result["MUC_f1"])
+            visdom_helper.update_line(line_name="dev_CEAFe_f1_epoch", round=epoch, value=dev_result["CEAFe_f1"])
+            visdom_helper.update_line(line_name="dev_CEAFm_f1_epoch", round=epoch, value=dev_result["CEAFm_f1"])
+            visdom_helper.update_line(line_name="dev_BLANCc_f1_epoch", round=epoch, value=dev_result["BLANCc_f1"])
+            visdom_helper.update_line(line_name="dev_BLANCn_f1_epoch", round=epoch, value=dev_result["BLANCn_f1"])
+            visdom_helper.update_line(line_name="dev_BLANC_f1_epoch", round=epoch, value=dev_result["BLANC_f1"])
+            visdom_helper.update_line(line_name="dev_CoNLL_f1_epoch", round=epoch, value=dev_result["CoNLL_f1"])
+            visdom_helper.update_line(line_name="dev_AVG_f1_epoch", round=epoch, value=dev_result["AVG_f1"])
+
             dev_evals[epoch] = dev_result
             dev_cluster_evals[epoch] = dev_cluster_result
 
@@ -1158,10 +1289,10 @@ def main():
             if dev_cluster_result["acc"] > best_dict["best_dev_acc_cluster"]:
                 best_dict["best_dev_acc_cluster"] = dev_cluster_result["acc"]
                 best_dict["best_dev_epoch_cluster"] = epoch
-            # 依据dev acc保存checkpoint
-            if dev_result["acc"] > best_dict["best_dev_acc"]:
-                best_dict["best_dev_acc"] = dev_result["acc"]
-                best_dict["best_dev_epoch"] = epoch
+            # 依据dev BLANC f1保存checkpoint
+            if dev_result["BLANC_f1"] > best_dict["best_dev_BLANC_f1"]:
+                best_dict["best_dev_BLANC_f1"] = dev_result["BLANC_f1"]
+                best_dict["best_dev_BLANC_f1_epoch"] = epoch
                 store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
                 # 分类评测
                 best_dev_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
@@ -1178,7 +1309,7 @@ def main():
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=num_labels)
 
         visdom_helper.show_dict(text_name="training_log", dic=best_dict)
-        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_epoch"]])
+        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_BLANC_f1_epoch"]])
         visdom_helper.show_dict(text_name="best_dev_eval_result_cluster", dic=dev_cluster_evals[best_dict["best_dev_epoch_cluster"]])
         # 实验记录
         generate_record(
