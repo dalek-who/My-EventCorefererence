@@ -5,7 +5,7 @@ def find_word_piece_index_for_tokens(tokens: list, word_pieces: list):
     pairs = []
     start_a_new_token = True
     while i < len(tokens) and j < len(word_pieces):
-        current_token = tokens[i].rstrip("\t").lower()
+        current_token = tokens[i].lower().rstrip("\t").replace("�","").replace("ô","o") # 数据集中这些符号在tokenlize时会变得和原来不一样，直接去掉
         if start_a_new_token:
             new_token = ""
             new_pair = [tokens[i], i, [], []]
@@ -53,3 +53,5 @@ for topic_id, topic in tqdm(ECB.document_view.topics_dict.items()):
                 if not is_success:
                     new_failed = (list(enumerate(tokens)), list(enumerate(word_pieces)), pairs, sentence.sid())
                     failed.append(new_failed)
+if len(failed)==0:
+    print("success")
