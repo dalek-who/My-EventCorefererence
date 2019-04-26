@@ -169,3 +169,118 @@ class MentionPairCreator(object):
         if to_csv:
             table.to_csv(csv_path, sep="\t", index=False)
         return table
+
+    def generate_sentence_pair(
+            self,
+            topics: list or str="all",
+            selected: bool = True,
+            cross_document: bool=True,
+            cross_topic: bool=True,
+            ignore_order: bool=True):
+
+        topics_list = list(self.ECBPLUS.document_view.topics_dict.keys()) if topics == "all" else topics[:]
+        sentences_all = []
+        sentences_by_topic = dict()
+        sentences_by_document = dict()
+        # 搜出所有sentence
+        for topic_id in topics_list:
+            try:
+                topic: EcbTopic = self.ECBPLUS.document_view.topics_dict[topic_id]
+            except KeyError:
+                print("no topic %s" % topic_id)
+                continue
+            sentences_by_topic[topic_id] = []
+            for document in topic.documents_dict.values():
+                document: EcbDocument = document
+                if selected:
+                    sentences_in_doc = [s for s in document.all_sentences_dict.values() if s.selected]
+                else:
+                    sentences_in_doc = [s for s in document.all_sentences_dict.values()]
+                sentences_by_document[document.document_name] = sentences_in_doc
+                sentences_by_topic[topic_id] += sentences_in_doc
+                sentences_all += sentences_in_doc
+
+        sentences_pairs = []
+        if cross_topic:  # 跨document，跨topic
+            pairs = combinations(sentences_all, r=2) if ignore_order else product(sentences_all, repeat=2)
+            for s1, s2 in tqdm(pairs, desc="Generate sentence-pair [cross topic]:"):
+                sentences_pairs.append((s1, s2))
+        elif cross_document:  # 跨document，不跨topic
+            for mentions_in_topic in tqdm(sentences_by_topic.values(), desc="Generate sentence-pair [cross document]:"):
+                pairs = combinations(mentions_in_topic, r=2) if ignore_order else product(mentions_in_topic, repeat=2)
+                for s1, s2 in pairs:
+                    sentences_pairs.append((s1, s2))
+        else:  # document内
+            for mentions_in_doc in tqdm(sentences_by_document.values(), desc="Generate sentence-pair [within document]:"):
+                pairs = combinations(mentions_in_doc, r=2) if ignore_order else product(mentions_in_doc, repeat=2)
+                for s1, s2 in pairs:
+                    sentences_pairs.append((s1, s2))
+        return sentences_pairs
+
+    def argument_feature(
+            self,
+            topics: str = "all",
+            cross_document: bool = True,
+            cross_topic: bool = True,
+            positive_increase: int=0,
+            shuffle: bool=True,
+            csv_path: str="",
+            to_csv: bool=True) -> DataFrame:
+        sentences_pairs = self.generate_sentence_pair(
+            topics=topics, selected=True, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True)
+        sentences_set = set(chain.from_iterable(sentences_pairs))
+        sentences_instances = dict()
+        # 生成每个句子的每类Argument集合
+        for sentence in tqdm(sentences_set, desc="collecting arguments"):
+            sentence: EcbSentence = sentence
+            sentences_instances[sentence] = defaultdict(set)
+            # 添加每个子类component的集合
+            for component in sentence.components_dict.values():
+                component: EcbComponent = component
+                if component.tag.startswith("'UNKNOWN"):
+                    continue
+                instance = component.instance_global if cross_document else component.instance_within
+                sentences_instances[sentence][component.tag].add(instance)
+            # 添加time，loc，human_participate,non_human_prticipate,action,neg_action的集合
+            actions = set()
+            neg_actions = set()
+            times = set()
+            locations = set()
+            human_participates = set()
+            non_human_participates = set()
+            for sub_tag, instances_set in sentences_instances[sentence].items():
+                if sub_tag.startswith("ACTION"):
+                    actions.update(instances_set)
+                elif sub_tag.startswith("NEG_ACTION"):
+                    neg_actions.update(instances_set)
+                elif sub_tag.startswith("TIME"):
+                    times.update(instances_set)
+                elif sub_tag.startswith("LOC"):
+                    locations.update(instances_set)
+                elif sub_tag.startswith("HUMAN"):
+                    human_participates.update(instances_set)
+                elif sub_tag.startswith("NON_HUMAN"):
+                    non_human_participates.update(instances_set)
+                else:
+                    raise KeyError(f"{sub_tag} is an illegal component tag")
+            sentences_instances[sentence]["ACTION"].update(actions)
+            sentences_instances[sentence]["NEG_ACTION"].update(neg_actions)
+            sentences_instances[sentence]["TIME"].update(times)
+            sentences_instances[sentence]["LOC"].update(locations)
+            sentences_instances[sentence]["HUMAN"].update(human_participates)
+            sentences_instances[sentence]["NON_HUMAN"].update(non_human_participates)
+
+            sentences_instances[sentence]["ACTION_and_NEG_ACTION"].update(actions | neg_actions)
+            sentences_instances[sentence]["HUMAN_and_NON_HUMAN"].update(human_participates | non_human_participates)
+            sentences_instances[sentence]["Arguments"].update(times | locations | human_participates | non_human_participates)
+
+        df_arg_feature = DataFrame(columns=["Quality", "#1 ID", "#2 ID", "#1 String", "#2 String"])
+        for s1, s2 in tqdm(sentences_pairs, desc="generate records"):
+            s1: EcbSentence = s1
+            s2: EcbSentence = s2
+            if s1.text() == s2.text():
+                continue
+            record = Series({"#1 ID":s1.sid(), "#2 ID":s2.sid(), "#1 String":s1.text(), "#2 String": s2.text()})
+            record["Quality"] = int((sentences_instances[s1]["ACTION_and_NEG_ACTION"] & sentences_instances[s2]["ACTION_and_NEG_ACTION"]) != set())
+            df_arg_feature = df_arg_feature.append(record, ignore_index=True)
+        return df_arg_feature
