@@ -8,6 +8,7 @@ import xml.etree.ElementTree as et
 from typing import List, Dict
 from itertools import chain
 import spacy
+from pytorch_pretrained_bert.tokenization import BertTokenizer
 
 from preprocessing.Structurize.utils import *
 from configs import CONFIG
@@ -18,6 +19,7 @@ DATA_DIR = ECB_DRI + "ECB+/"
 CSV_ECBplus_coreference_sentences = read_csv(CONFIG.CSV_DIR)
 
 spacy_nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", do_lower_case=True)
 
 class EcbPlusTopView(object):
     """ ECB+数据集最顶层的视角"""
@@ -113,7 +115,7 @@ class EcbDocument(object):
             sentence.tokens_list.append(token)
             token.sentence = sentence  # token到sentence的反向索引
 
-        # 选取被选择到coreference数据集中的句子
+        # 选取被选择到coreference数据集中的句子,对句子切分Word Piece
         Topic = self.topic_id
         File = self.document_name.rstrip(".xml").split("_")[-1]
         try:
@@ -121,6 +123,7 @@ class EcbDocument(object):
             for sid in selected_sentence_id:
                 sentence: EcbSentence = self.all_sentences_dict[sid]
                 sentence.selected = True
+                sentence.word_pieces_list = tokenizer.tokenize(sentence.text())
         except KeyError as KE:
             print("No sentences are selected in this file:", KE)
 
@@ -267,6 +270,7 @@ class EcbSentence(object):
         self.tokens_list: List[EcbToken] = []
         self.components_dict: Dict[int, EcbComponent] = {}
         self.document: EcbDocument = document
+        self.word_pieces_list = None
 
     def sid(self):
         return self.document.document_name + "-" + str(self.sentence_id)
@@ -310,7 +314,7 @@ class EcbComponent(object):
         self.instance_global: EcbInstance = None
 
     def global_mid(self) -> str:
-        return self.sentence.document.document_name + "-" + str(self.mid)
+        return self.sentence.document.document_name + "-m-" + str(self.mid)
 
 
 
