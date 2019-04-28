@@ -113,6 +113,8 @@ class InputFeatures(object):
     """A single set of features of data."""
     def __init__(
             self,
+            id_a,
+            id_b,
             input_ids,
             input_mask,
             segment_ids,
@@ -122,6 +124,8 @@ class InputFeatures(object):
             tf_idf_b,
             label
     ):
+        self.id_a = id_a
+        self.id_b = id_b
         self.label = label
         # bert 句子特征的输入
         self.BERT_input_ids = input_ids
@@ -153,12 +157,14 @@ class InputFeaturesCreator(object):
 
         mention_pair_list = MentionPairCreator(self.ecb).generate_mention_pairs(
             topics=topics, cross_document=cross_document, cross_topic=cross_topic, prefix_list=["ACTION", "NEG_ACTION"], ignore_order=ignore_order)
-        examples = []
+        features = []
         for pair in tqdm(mention_pair_list, desc="Extracting features:"):
             pair: MentionPair = pair
             input_ids, input_mask, segment_ids, trigger_mask_a, trigger_mask_b = \
                 convert_mention_pair_to_BERT_features(mention_pair=pair, max_seq_length=max_seq_length, trigger_half_window=trigger_half_window)
-            example = InputFeatures(
+            feature = InputFeatures(
+                id_a=pair.mention_pair[0].global_mid(),
+                id_b=pair.mention_pair[1].global_mid(),
                 label=int(pair.label(cross_document=cross_document)),
                 input_ids=input_ids,
                 input_mask=input_mask,
@@ -168,8 +174,8 @@ class InputFeaturesCreator(object):
                 tf_idf_a=[0,1], # todo
                 tf_idf_b=[1,0]
             )
-            examples.append(example)
-        return examples
+            features.append(feature)
+        return features
 
 
 def find_word_piece_index_for_tokens(tokens: list, word_pieces: list):

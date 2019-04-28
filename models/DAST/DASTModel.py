@@ -55,7 +55,7 @@ class DAST_SentenceTrigger(BertPreTrainedModel):
         self.num_labels = num_labels
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, num_labels)
+        self.classifier = nn.Linear(config.hidden_size * 3, num_labels)
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b):

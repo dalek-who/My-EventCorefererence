@@ -17,15 +17,18 @@
 
 from __future__ import absolute_import, division, print_function
 
+import sys
+sys.path.append(".")
+sys.path.append("..")
+sys.path.append("../..")
+
 import argparse
 import csv
 import logging
 import os
 import random
-import sys
-sys.path.append("..")
-sys.path.append("../..")
 
+import json
 import numpy as np
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
@@ -41,488 +44,24 @@ from pandas import DataFrame, Series, read_csv
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from pytorch_pretrained_bert.modeling import BertForSequenceClassification, BertConfig, WEIGHTS_NAME, CONFIG_NAME
 from pytorch_pretrained_bert.tokenization import BertTokenizer
-from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
+from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear  # 新版本没有warmup_linear
+# from pytorch_pretrained_bert.optimization import BertAdam
 
 from configs import CONFIG
 from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
 from utils.coref_eval import evaluate_coref_from_example
 from models.clustering import connected_components_clustering, examples_to_predict_frame
 
+# 新加的
+from preprocessing.Structurize.EcbClass import EcbPlusTopView
+from preprocessing.Feature.MentionPair import InputFeaturesCreator
+from models.DAST.DASTModel import DAST_SentenceTrigger
+
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-class InputExample(object):
-    """A single training/test example for simple sequence classification."""
-
-    def __init__(self, guid, text_a, text_b=None, label=None, id_a=None, id_b=None):
-        """Constructs a InputExample.
-        Args:
-            guid: Unique id for the example.
-            text_a: string. The untokenized text of the first sequence. For single
-            sequence tasks, only this sequence must be specified.
-            text_b: (Optional) string. The untokenized text of the second sequence.
-            Only must be specified for sequence pair tasks.
-            label: (Optional) string. The label of the example. This should be
-            specified for train and dev examples, but not for test examples.
-        """
-        self.guid = guid
-        self.text_a = text_a
-        self.text_b = text_b
-        self.label = label
-        self.id_a = id_a
-        self.id_b = id_b
-
-
-class InputFeatures(object):
-    """A single set of features of data."""
-
-    def __init__(self, input_ids, input_mask, segment_ids, label_id):
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.label_id = label_id
-
-
-class DataProcessor(object):
-    """Base class for data converters for sequence classification data sets."""
-
-    def get_train_examples(self, data_dir):
-        """Gets a collection of `InputExample`s for the train set."""
-        raise NotImplementedError()
-
-    def get_dev_examples(self, data_dir):
-        """Gets a collection of `InputExample`s for the dev set."""
-        raise NotImplementedError()
-
-    def get_labels(self):
-        """Gets the list of labels for this data set."""
-        raise NotImplementedError()
-
-    @classmethod
-    def _read_tsv(cls, input_file, quotechar=None):
-        """Reads a tab separated value file."""
-        with open(input_file, "r") as f:
-            reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
-            lines = []
-            for line in reader:
-                if sys.version_info[0] == 2:
-                    line = list(unicode(cell, 'utf-8') for cell in line)
-                lines.append(line)
-            return lines
-
-
-class MrpcProcessor(DataProcessor):
-    """Processor for the MRPC data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        logger.info("LOOKING AT {}".format(os.path.join(data_dir, "train.tsv")))
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["0", "1"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, i)
-            text_a = line[3]
-            text_b = line[4]
-            id_a = line[1]
-            id_b = line[2]
-            label = line[0]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label, id_a=id_a, id_b=id_b))
-        return examples
-
-
-class MnliProcessor(DataProcessor):
-    """Processor for the MultiNLI data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev_matched.tsv")),
-            "dev_matched")
-
-    def get_labels(self):
-        """See base class."""
-        return ["contradiction", "entailment", "neutral"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            text_a = line[8]
-            text_b = line[9]
-            label = line[-1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-class MnliMismatchedProcessor(MnliProcessor):
-    """Processor for the MultiNLI Mismatched data set (GLUE version)."""
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev_mismatched.tsv")),
-            "dev_matched")
-
-
-class ColaProcessor(DataProcessor):
-    """Processor for the CoLA data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["0", "1"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            text_a = line[3]
-            label = line[1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
-        return examples
-
-
-class Sst2Processor(DataProcessor):
-    """Processor for the SST-2 data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["0", "1"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, i)
-            text_a = line[0]
-            label = line[1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
-        return examples
-
-
-class StsbProcessor(DataProcessor):
-    """Processor for the STS-B data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return [None]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            text_a = line[7]
-            text_b = line[8]
-            label = line[-1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-class QqpProcessor(DataProcessor):
-    """Processor for the STS-B data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["0", "1"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            try:
-                text_a = line[3]
-                text_b = line[4]
-                label = line[5]
-            except IndexError:
-                continue
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-class QnliProcessor(DataProcessor):
-    """Processor for the STS-B data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")),
-            "dev_matched")
-
-    def get_labels(self):
-        """See base class."""
-        return ["entailment", "not_entailment"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            text_a = line[1]
-            text_b = line[2]
-            label = line[-1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-class RteProcessor(DataProcessor):
-    """Processor for the RTE data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["entailment", "not_entailment"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            text_a = line[1]
-            text_b = line[2]
-            label = line[-1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-class WnliProcessor(DataProcessor):
-    """Processor for the WNLI data set (GLUE version)."""
-
-    def get_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train")
-
-    def get_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev")
-
-    def get_labels(self):
-        """See base class."""
-        return ["0", "1"]
-
-    def _create_examples(self, lines, set_type):
-        """Creates examples for the training and dev sets."""
-        examples = []
-        for (i, line) in enumerate(lines):
-            if i == 0:
-                continue
-            guid = "%s-%s" % (set_type, line[0])
-            text_a = line[1]
-            text_b = line[2]
-            label = line[-1]
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        return examples
-
-
-def convert_examples_to_features(examples, label_list, max_seq_length,
-                                 tokenizer, output_mode):
-    """Loads a data file into a list of `InputBatch`s."""
-
-    label_map = {label: i for i, label in enumerate(label_list)}
-
-    features = []
-    for (ex_index, example) in enumerate(examples):
-        if ex_index % 10000 == 0:
-            logger.info("Writing example %d of %d" % (ex_index, len(examples)))
-
-        tokens_a = tokenizer.tokenize(example.text_a)
-
-        tokens_b = None
-        if example.text_b:
-            tokens_b = tokenizer.tokenize(example.text_b)
-            # Modifies `tokens_a` and `tokens_b` in place so that the total
-            # length is less than the specified length.
-            # Account for [CLS], [SEP], [SEP] with "- 3"
-            _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
-        else:
-            # Account for [CLS] and [SEP] with "- 2"
-            if len(tokens_a) > max_seq_length - 2:
-                tokens_a = tokens_a[:(max_seq_length - 2)]
-
-        # The convention in BERT is:
-        # (a) For sequence pairs:
-        #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-        #  type_ids: 0   0  0    0    0     0       0 0    1  1  1  1   1 1
-        # (b) For single sequences:
-        #  tokens:   [CLS] the dog is hairy . [SEP]
-        #  type_ids: 0   0   0   0  0     0 0
-        #
-        # Where "type_ids" are used to indicate whether this is the first
-        # sequence or the second sequence. The embedding vectors for `type=0` and
-        # `type=1` were learned during pre-training and are added to the wordpiece
-        # embedding vector (and position vector). This is not *strictly* necessary
-        # since the [SEP] token unambiguously separates the sequences, but it makes
-        # it easier for the model to learn the concept of sequences.
-        #
-        # For classification tasks, the first vector (corresponding to [CLS]) is
-        # used as as the "sentence vector". Note that this only makes sense because
-        # the entire model is fine-tuned.
-        tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
-        segment_ids = [0] * len(tokens)
-
-        if tokens_b:
-            tokens += tokens_b + ["[SEP]"]
-            segment_ids += [1] * (len(tokens_b) + 1)
-
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1] * len(input_ids)
-
-        # Zero-pad up to the sequence length.
-        padding = [0] * (max_seq_length - len(input_ids))
-        input_ids += padding
-        input_mask += padding
-        segment_ids += padding
-
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
-
-        if output_mode == "classification":
-            label_id = label_map[example.label]
-        elif output_mode == "regression":
-            label_id = float(example.label)
-        else:
-            raise KeyError(output_mode)
-
-        if ex_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
-            logger.info("tokens: %s" % " ".join(
-                [str(x) for x in tokens]))
-            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-            logger.info(
-                "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label_id))
-
-        features.append(
-            InputFeatures(input_ids=input_ids,
-                          input_mask=input_mask,
-                          segment_ids=segment_ids,
-                          label_id=label_id))
-    return features
-
-
-def _truncate_seq_pair(tokens_a, tokens_b, max_length):
-    """Truncates a sequence pair in place to the maximum length."""
-
-    # This is a simple heuristic which will always truncate the longer sequence
-    # one token at a time. This makes more sense than truncating an equal percent
-    # of tokens from each, since if one sequence is very short then each token
-    # that's truncated likely contains more information than a longer sequence.
-    while True:
-        total_length = len(tokens_a) + len(tokens_b)
-        if total_length <= max_length:
-            break
-        if len(tokens_a) > len(tokens_b):
-            tokens_a.pop()
-        else:
-            tokens_b.pop()
 
 
 def simple_accuracy(preds, labels):
@@ -553,38 +92,10 @@ def acc_and_f1_and_p_and_r(preds, labels):
     }
 
 
-def pearson_and_spearman(preds, labels):
-    pearson_corr = pearsonr(preds, labels)[0]
-    spearman_corr = spearmanr(preds, labels)[0]
-    return {
-        "pearson": pearson_corr,
-        "spearmanr": spearman_corr,
-        "corr": (pearson_corr + spearman_corr) / 2,
-    }
-
-
 def compute_metrics(task_name, preds, labels):
     assert len(preds) == len(labels)
-    if task_name == "cola":
-        return {"mcc": matthews_corrcoef(labels, preds)}
-    elif task_name == "sst-2":
-        return {"acc": simple_accuracy(preds, labels)}
-    elif task_name == "mrpc":
+    if task_name == "mrpc":
         return acc_and_f1_and_p_and_r(preds, labels)
-    elif task_name == "sts-b":
-        return pearson_and_spearman(preds, labels)
-    elif task_name == "qqp":
-        return acc_and_f1(preds, labels)
-    elif task_name == "mnli":
-        return {"acc": simple_accuracy(preds, labels)}
-    elif task_name == "mnli-mm":
-        return {"acc": simple_accuracy(preds, labels)}
-    elif task_name == "qnli":
-        return {"acc": simple_accuracy(preds, labels)}
-    elif task_name == "rte":
-        return {"acc": simple_accuracy(preds, labels)}
-    elif task_name == "wnli":
-        return {"acc": simple_accuracy(preds, labels)}
     else:
         raise KeyError(task_name)
 
@@ -599,11 +110,12 @@ def store_model_to_checkpoint(model, output_checkpoint_dir):
     logger.info("Store checkpoint: model parameters to %s" % output_model_file)
 
 
-def load_model_from_checkpoint(load_checkpoint_dir, num_labels):
+def load_model_from_checkpoint(load_checkpoint_dir, num_labels, ModelClass):
     load_model_file = os.path.join(load_checkpoint_dir, WEIGHTS_NAME)
     load_config_file = os.path.join(load_checkpoint_dir, CONFIG_NAME)
     config = BertConfig(load_config_file)
-    model = BertForSequenceClassification(config, num_labels=num_labels)
+    # model = BertForSequenceClassification(config, num_labels=num_labels)
+    model = ModelClass(config, num_labels=num_labels)
     model.load_state_dict(torch.load(load_model_file))
     logger.info("Load checkpoint: model parameters from %s" % load_model_file)
     return model
@@ -623,6 +135,7 @@ def dataset_statistic(examples):
     stat_result["neg_rate"] = 1 - stat_result["pos_rate"]
     return stat_result
 
+
 def dataset_increase(examples: list, more: int, label: int=1):
     """
     扩增数据，解决正负例不平衡
@@ -635,6 +148,16 @@ def dataset_increase(examples: list, more: int, label: int=1):
     if more>=1:
         return examples + sub_example * more
     return examples
+
+def dataset_shuffle(examples: list):
+    """
+    对数据集做shuffle
+    :param examples:输入模型的数据集list
+    :return: shuffle后的np.array
+    """
+    result = np.array(examples)
+    np.random.shuffle(result)
+    return result
 
 def do_eval(task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps, global_step, device):
     logger.info("***** Running evaluation *****")
@@ -714,6 +237,385 @@ def do_eval_cluster(task_name, eval_examples, preds, return_df=False):
     else:
         return cluster_result, cluster_preds
 
+
+def create_model_input_loader(feature_list: list, batch_size):
+    all_BERT_input_ids = torch.tensor([f.BERT_input_ids for f in feature_list], dtype=torch.long)
+    all_BERT_input_mask = torch.tensor([f.BERT_input_mask for f in feature_list], dtype=torch.long)
+    all_BERT_segment_ids = torch.tensor([f.BERT_segment_ids for f in feature_list], dtype=torch.long)
+    all_BERT_trigger_mask_a = torch.tensor([f.BERT_trigger_mask_a for f in feature_list], dtype=torch.long)
+    all_BERT_trigger_mask_b = torch.tensor([f.BERT_trigger_mask_b for f in feature_list], dtype=torch.long)
+    all_label = torch.tensor([f.label for f in feature_list], dtype=torch.long)
+    BERT_data = TensorDataset(
+        all_BERT_input_ids, all_BERT_input_mask, all_BERT_segment_ids,
+        all_BERT_trigger_mask_a, all_BERT_trigger_mask_b, all_label)
+    BERT_dataloader = DataLoader(BERT_data, batch_size=batch_size, shuffle=False)  # 之前已经手动shuffle
+    return BERT_dataloader
+
+
+def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gpu: int, fp16: bool,
+             visdom_helper: VisdomHelper, num_train_optimization_steps: int, warmup_proportion: float,
+             learning_rate: float, loss_each_step: dict, learning_rate_each_step: dict):
+    if model is not None:
+        model.train()
+    global train_global_step
+    train_BERT_dataloader = BERT_dataloader
+    for step, batch in tqdm(enumerate(train_BERT_dataloader), desc="Train: "):
+        batch = tuple(t.to(device) for t in batch)
+        input_ids, input_mask, segment_ids, label_ids = batch
+
+        # define a new function to compute loss values for both output_modes
+        logits = model(input_ids, segment_ids, input_mask)
+        loss_fct = CrossEntropyLoss()
+        loss = loss_fct(logits.view(-1, 2), label_ids.view(-1))
+
+        if n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu.
+
+        if fp16:
+            optimizer.backward(loss)
+        else:
+            loss.backward()
+
+        # 学习率曲线
+        lr_this_step = learning_rate * warmup_linear(train_global_step / num_train_optimization_steps, warmup_proportion)
+        visdom_helper.update_line(line_name="learning rate", round=train_global_step, value=lr_this_step)
+        # 更新
+        if fp16:
+            # modify learning rate with special warm up BERT uses
+            # if args.fp16 is False, BertAdam is used that handles this automatically
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_this_step
+        optimizer.step()
+        optimizer.zero_grad()
+        train_global_step += 1
+
+        # 记录数据点
+        loss_each_step[train_global_step] = loss
+        learning_rate_each_step[train_global_step] = lr_this_step
+        # 绘图
+
+
+def do_predict(model, device, BERT_dataloader, feature_list: list):
+    if model is not None:
+        model.eval()
+    eval_BERT_dataloader = BERT_dataloader
+
+    eval_loss = 0
+    nb_eval_steps = 0
+    preds = []
+    for step, batch in tqdm(enumerate(eval_BERT_dataloader), desc="Predict: "):
+        batch = tuple(t.to(device) for t in batch)
+        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
+        with torch.no_grad():
+            logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b)
+
+        # create eval loss and other metric required by the task
+        loss_fct = CrossEntropyLoss()
+        tmp_eval_loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+
+        eval_loss += tmp_eval_loss.mean().item()
+        nb_eval_steps += 1
+        if len(preds) == 0:
+            preds.append(logits.detach().cpu().numpy())
+        else:
+            preds[0] = np.append(preds[0], logits.detach().cpu().numpy(), axis=0)
+
+    # 计算评价指标
+    preds = np.argmax(preds[0], axis=1)
+    labels = np.array([f.label for f in feature_list])
+    eval_result_classifier = acc_and_f1_and_p_and_r(preds, labels)  # 分类器指标
+    eval_result_coref = evaluate_coref_from_example(feature_list, preds)  # coref指标
+    result = dict(eval_result_classifier, **eval_result_coref)
+    result['eval_loss']  = eval_loss / nb_eval_steps
+    return result, preds
+
+
+def prepare_optimizer(model, fp16: bool, loss_scale: float, learning_rate: float, warmup_proportion: float, num_train_optimization_steps: int):
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    if fp16:
+        try:
+            from apex.optimizers import FP16_Optimizer
+            from apex.optimizers import FusedAdam
+        except ImportError:
+            raise ImportError(
+                "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+
+        optimizer = FusedAdam(optimizer_grouped_parameters, lr=args.learning_rate, bias_correction=False,
+                              max_grad_norm=1.0)
+        if loss_scale == 0:
+            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
+        else:
+            optimizer = FP16_Optimizer(optimizer, static_loss_scale=loss_scale)
+    else:
+        optimizer = BertAdam(optimizer_grouped_parameters, lr=learning_rate, warmup=warmup_proportion,
+                             t_total=num_train_optimization_steps)
+    return optimizer
+
+
+def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: dict, eval_result: dict,
+                            epoch: int, global_step: int, by_what: str="CoNLL_f1"):
+    if eval_result[by_what] > compare_dict["best_result"]:
+        logger.info(f"********** best model with {by_what}={eval_result[by_what]}, update checkpoint **********")
+        compare_dict["best_result"] = eval_result[by_what]
+        compare_dict["best_epoch"] = epoch
+        compare_dict["best_global_step"] = global_step
+        store_model_to_checkpoint(model=model, output_checkpoint_dir=output_checkpoint_dir)
+
+train_global_step = 0
+def my_main():
+    """
+    定义main的命令行参数args
+    :return: args
+    """
+    parser = argparse.ArgumentParser()
+    ## Required parameters
+    parser.add_argument("--bert_model", default=None, type=str, required=True,
+                        help="Bert pre-trained model selected in the list: bert-base-uncased, "
+                             "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
+                             "bert-base-multilingual-cased, bert-base-chinese.")
+    ## Other parameters
+    parser.add_argument("--cache_dir",
+                        default="",
+                        type=str,
+                        help="Where do you want to store the pre-trained models downloaded from s3")
+    parser.add_argument("--max_seq_length",
+                        default=128,
+                        type=int,
+                        help="The maximum total input sequence length after WordPiece tokenization. \n"
+                             "Sequences longer than this will be truncated, and sequences shorter \n"
+                             "than this will be padded.")
+    parser.add_argument("--trigger_half_window",
+                        default=2,
+                        type=int,
+                        help="Context words number before and after trigger word.")
+    parser.add_argument("--do_train",
+                        action='store_true',
+                        help="Whether to run training.")
+    parser.add_argument("--do_predict_only",
+                        action='store_true',
+                        help="Whether to run predict on the dev set.")
+    parser.add_argument("--do_lower_case",
+                        action='store_true',
+                        help="Set this flag if you are using an uncased model.")
+    parser.add_argument("--batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for training.")
+    parser.add_argument("--learning_rate",
+                        default=5e-5,
+                        type=float,
+                        help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=3.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument("--warmup_proportion",
+                        default=0.1,
+                        type=float,
+                        help="Proportion of training to perform linear learning rate warmup for. "
+                             "E.g., 0.1 = 10%% of training.")
+    parser.add_argument("--no_cuda",
+                        action='store_true',
+                        help="Whether not to use CUDA when available")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
+    parser.add_argument('--fp16',
+                        action='store_true',
+                        help="Whether to use 16-bit float precision instead of 32-bit")
+    parser.add_argument('--loss_scale',
+                        type=float, default=0,
+                        help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
+                             "0 (default value): dynamic loss scaling.\n"
+                             "Positive power of 2: static loss scaling value.\n")
+    parser.add_argument("--load_trained",
+                        action='store_true',
+                        help="Whether to load fine-turned model.")
+    parser.add_argument("--load_model_dir",
+                        default="",
+                        type=str,
+                        help="Directory where do you want to load the fine-turned model parameters")
+    parser.add_argument("--predict_output_dir",
+                        default="",
+                        type=str,
+                        help="Directory where do you want to store the predict result")
+    parser.add_argument("--train_output_dir",
+                        default="",
+                        type=str,
+                        help="The output directory for train where the model predictions and checkpoints will be written.")
+    parser.add_argument("--coref_level",
+                        required=True,
+                        type=str,
+                        help="Which level's coreference, could be 'within_document', 'cross_document', 'cross_topic'")
+    parser.add_argument("--description",
+                        default="",
+                        type=str,
+                        help="Description of this experiment")
+    parser.add_argument("--increase_positive",
+                        default=0,
+                        type=int,
+                        help="How many times positive examples should be increased.")
+    parser.add_argument("--draw_visdom",
+                        action="store_true",
+                        help="Weather to use visdom to draw.")
+    parser.add_argument("--use_document_feature",
+                        action="store_true",
+                        help="Whether to use document features.")
+    parser.add_argument("--use_sentence_trigger_feature",
+                        action="store_true",
+                        help="Whether to use sentence and trigger features")
+    parser.add_argument("--use_argument_feature",
+                        action="store_true",
+                        help="Whether to use argument features")
+
+    args = parser.parse_args()
+
+    # 运算设备
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    n_gpu = torch.cuda.device_count()
+    logger.info("device: {} n_gpu: {}, 16-bits training: {}".format(
+        device, n_gpu, args.fp16))
+
+    # 随机种子。如果每次设定的随机种子一样，则随机数的序列也一样
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if n_gpu > 0:
+        torch.cuda.manual_seed_all(args.seed)
+
+    # 判断输出目录是否已存在且非空
+    if not args.do_train and not args.do_predict_only:
+        raise ValueError("At least one of `do_train` or `do_predict_only` must be True.")
+    # 模型参数目录
+    if os.path.exists(args.train_output_dir) and os.listdir(args.train_output_dir) and args.do_train:
+        raise ValueError("Train output directory ({}) already exists and is not empty.".format(args.train_output_dir))
+    if args.do_train and not os.path.exists(args.train_output_dir):
+        os.makedirs(args.train_output_dir)
+    # 预测结果目录
+    if os.path.exists(args.predict_output_dir) and os.listdir(args.predict_output_dir):
+        raise ValueError("Predict output directory ({}) already exists and is not empty.".format(args.train_output_dir))
+    if not os.path.exists(args.predict_output_dir):
+        os.makedirs(args.predict_output_dir)
+
+
+    # 是否跨文档，是否跨主题
+    if args.coref_level == "within_document":
+        cross_document, cross_topic = False, False
+    elif args.coref_level == "cross_document":
+        cross_document, cross_topic = True, False
+    elif args.coref_level == "cross_topic":
+        cross_document, cross_topic = True, True
+    else:
+        raise ValueError("--coref_level=%s is invalid" % args.coref_level)
+
+    # 准备数据
+    feature_creator = InputFeaturesCreator(ECBPlus=EcbPlusTopView())
+    logger.info("*******  Create eval features  ******")
+    dev_features = feature_creator.create_from_dataset(
+        topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+        max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+
+    num_train_optimization_steps = 0
+    train_features = []
+    if args.do_train:
+        logger.info("*******  Create train features  ******")
+        train_features = feature_creator.create_from_dataset(
+            topics=CONFIG.topics_train, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+            max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+        num_train_optimization_steps = int(len(train_features) / args.batch_size) * args.num_train_epochs
+        if args.increase_positive >= 1:  # 扩增正例
+            train_features = dataset_increase(examples=train_features, more=args.increase_positive, label=1)
+        train_features = dataset_shuffle(train_features)
+
+    # 准备模型
+    cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_-1')
+    if args.use_sentence_trigger_feature and not args.use_document_feature and not args.use_argument_feature:
+        ModelClass = DAST_SentenceTrigger
+    else:
+        ModelClass = None
+    if ModelClass is not None:
+        model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
+    else:
+        model = None
+        # raise ModuleNotFoundError("Please choose a model")  # todo
+
+    if args.fp16:
+        model.half()
+    model.to(device)  # todo
+    if n_gpu > 1:
+        model = torch.nn.DataParallel(model)
+
+    # 准备绘图
+    time_stamp = get_time_stamp()
+    visdom_helper = VisdomHelper(env=f"train BERT Sentence Matching: {time_stamp} {args.description}",
+                                 enable=args.draw_visdom)
+
+    dev_BERT_dataloader = create_model_input_loader(feature_list=dev_features, batch_size=args.batch_size)
+    if args.do_train:
+        # 准备优化器
+        optimizer = prepare_optimizer(
+            model, fp16=args.fp16, loss_scale=args.loss_scale, learning_rate=args.learning_rate,
+            warmup_proportion=args.warmup_proportion, num_train_optimization_steps=num_train_optimization_steps)
+        train_BERT_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
+
+        train_round = -1
+        epoch = -1
+        train_evals = dict()
+        dev_evals = dict()
+        train_cluster_evals = dict()
+        dev_cluster_evals = dict()
+        draw_acc_each_epoch = False
+        draw_acc_steps = num_train_optimization_steps / 100
+
+        global global_train_step
+        compare_dict = {"best_result": -1, "best_epoch": -1, "best_global_step": -1}
+        train_curve_datas = {
+            "train_loss_each_step": dict(),
+            "learning_rate_each_step": dict(),
+            "eval_result_each_epoch_on_train": dict(),
+            "eval_result_each_epoch_on_dev": dict(),
+        }
+        # 训练开始前先eval一次
+        train_result, train_pred = do_predict(
+            model=model, device=device, BERT_dataloader=train_BERT_dataloader, feature_list=train_features)
+        eval_result, eval_pred = do_predict(
+            model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+        train_curve_datas["eval_result_each_epoch_on_train"][0] = train_result
+        train_curve_datas["eval_result_each_epoch_on_dev"][0] = eval_result
+        for epoch in trange(1, int(args.num_train_epochs)+1, desc="Epoch"):
+            do_train(
+                model=model, optimizer=optimizer, device=device, BERT_dataloader=train_BERT_dataloader,
+                feature_list=train_features, n_gpu=n_gpu, fp16=args.fp16, visdom_helper=visdom_helper,
+                num_train_optimization_steps=num_train_optimization_steps, warmup_proportion=args.warmup_proportion,
+                learning_rate=args.learning_rate, loss_each_step=train_curve_datas["train_loss_each_step"],
+                learning_rate_each_step=train_curve_datas["learning_rate_each_step"])
+            train_result, train_pred = do_predict(
+                model=model, device=device, BERT_dataloader=train_BERT_dataloader, feature_list=train_features)
+            eval_result, eval_pred = do_predict(
+                model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+            train_curve_datas["eval_result_each_epoch_on_train"][epoch] = train_result
+            train_curve_datas["eval_result_each_epoch_on_dev"][epoch] = eval_result
+            compare_with_checkpoint(
+                model=model, output_checkpoint_dir=args.train_output_dir, logger=logger, compare_dict=compare_dict,
+                eval_result=eval_result, epoch=epoch, global_step=global_train_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
+        # 保存训练曲线的所有数据点
+        with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
+            json.dump(train_curve_datas, f)
+
+    # todo: load
+    # todo: train结束后， load最好的模型再测一次
+    if args.do_predict_only:
+        if args.load_trained:
+            model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
+        else:
+            model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
+        eval_result, eval_pred = do_predict(model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -851,28 +753,11 @@ def main():
         ptvsd.wait_for_attach()
 
     processors = {
-        "cola": ColaProcessor,
-        "mnli": MnliProcessor,
-        "mnli-mm": MnliMismatchedProcessor,
         "mrpc": MrpcProcessor,  # 判断两个句子是否语义等价。和我的coreference任务最接近
-        "sst-2": Sst2Processor,
-        "sts-b": StsbProcessor,
-        "qqp": QqpProcessor,
-        "qnli": QnliProcessor,
-        "rte": RteProcessor,
-        "wnli": WnliProcessor,
     }
 
     output_modes = {
-        "cola": "classification",
-        "mnli": "classification",
         "mrpc": "classification",
-        "sst-2": "classification",
-        "sts-b": "regression",
-        "qqp": "classification",
-        "qnli": "classification",
-        "rte": "classification",
-        "wnli": "classification",
     }
 
     if args.local_rank == -1 or args.no_cuda:
@@ -1513,4 +1398,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    my_main()
