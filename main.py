@@ -56,6 +56,7 @@ from models.clustering import connected_components_clustering, examples_to_predi
 from preprocessing.Structurize.EcbClass import EcbPlusTopView
 from preprocessing.Feature.MentionPair import InputFeaturesCreator
 from models.DAST.DASTModel import DAST_SentenceTrigger
+from utils.VisdomHelper import EasyVisdom
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -253,18 +254,17 @@ def create_model_input_loader(feature_list: list, batch_size):
 
 
 def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gpu: int, fp16: bool,
-             visdom_helper: VisdomHelper, num_train_optimization_steps: int, warmup_proportion: float,
+             visdom_helper: EasyVisdom, num_train_optimization_steps: int, warmup_proportion: float,
              learning_rate: float, loss_each_step: dict, learning_rate_each_step: dict):
     if model is not None:
         model.train()
     global train_global_step
     train_BERT_dataloader = BERT_dataloader
     for step, batch in tqdm(enumerate(train_BERT_dataloader), desc="Train: "):
+        train_global_step += 1
         batch = tuple(t.to(device) for t in batch)
-        input_ids, input_mask, segment_ids, label_ids = batch
-
-        # define a new function to compute loss values for both output_modes
-        logits = model(input_ids, segment_ids, input_mask)
+        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
+        logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b)
         loss_fct = CrossEntropyLoss()
         loss = loss_fct(logits.view(-1, 2), label_ids.view(-1))
 
@@ -278,7 +278,6 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
 
         # 学习率曲线
         lr_this_step = learning_rate * warmup_linear(train_global_step / num_train_optimization_steps, warmup_proportion)
-        visdom_helper.update_line(line_name="learning rate", round=train_global_step, value=lr_this_step)
         # 更新
         if fp16:
             # modify learning rate with special warm up BERT uses
@@ -287,12 +286,12 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
                 param_group['lr'] = lr_this_step
         optimizer.step()
         optimizer.zero_grad()
-        train_global_step += 1
 
         # 记录数据点
         loss_each_step[train_global_step] = loss
         learning_rate_each_step[train_global_step] = lr_this_step
         # 绘图
+        draw_visdom_each_step(visdom_helper=visdom_helper, step=train_global_step, train_loss=loss, learning_rate=learning_rate)
 
 
 def do_predict(model, device, BERT_dataloader, feature_list: list):
@@ -365,6 +364,66 @@ def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: 
         compare_dict["best_epoch"] = epoch
         compare_dict["best_global_step"] = global_step
         store_model_to_checkpoint(model=model, output_checkpoint_dir=output_checkpoint_dir)
+
+
+def draw_visdom_each_epoch(visdom_helper: EasyVisdom, epoch: int, train_result: dict, eval_result: dict):
+
+    # 每个指标一张图, 图里有train和dev两条线
+    for which_line in ("MUC_f1", "B-cuded_f1", "CEAFe_f1", "CEAFm_f1", "BLANCc_f1", "BLANCn_f1", "BLANC_f1",
+                       "CoNLL_f1", "AVG_f1"):
+        for name, result in [("Train", train_result), ("Eval", eval_result)]:
+            visdom_helper.update_line(
+                x_axis_name="Epoch", y_axis_name="Evaluation Result", line_name="%s_%s" % (name, which_line),
+                title_name="%s of each Epoch" % which_line, x=epoch, y=result[which_line])
+
+    # 一张loss图，里面有train和dev两条线
+    for name, result in [("Train", train_result), ("Eval", eval_result)]:
+        visdom_helper.update_line(
+            x_axis_name="Epoch", y_axis_name="Loss", line_name="%s_loss" % name,
+            title_name="Loss of each Epoch", x=epoch, y=result["eval_loss"])
+
+    # dev，train各一张图，每张图里每个单项指标一条线
+    for which_line in ("MUC_f1", "B-cuded_f1", "CEAFe_f1", "BLANC_f1"):
+        for name, result in [("Train", train_result), ("Eval", eval_result)]:
+            visdom_helper.update_line(x_axis_name="Epoch", y_axis_name="Evaluation Result", line_name="%s_%s" % (name, which_line),
+                                      title_name="%s Single Metrics of each Epoch" % name, x=epoch, y=result[which_line])
+
+    # dev，train各一张图，每张图里每个复合指标一条线
+    for which_line in ("BLANC_f1", "CoNLL_f1", "AVG_f1"):
+        for name, result in [("Train", train_result), ("Eval", eval_result)]:
+            visdom_helper.update_line(x_axis_name="Epoch", y_axis_name="Evaluation Result", line_name="%s_%s" % (name, which_line),
+                                      title_name="%s Composite Metrics of each epoch" % name, x=epoch, y=result[which_line])
+
+
+def draw_visdom_each_step(visdom_helper: EasyVisdom, step: int, train_loss: float, learning_rate: float):
+    # loss
+    visdom_helper.update_line(x_axis_name="Step", y_axis_name="Loss", line_name="Train_Loss",
+                              title_name="Train Loss of each Step", x=step, y=train_loss)
+    # 50 step平滑loss
+    visdom_helper.update_line_smooth(x_axis_name="Step", y_axis_name="Loss", line_name="Train_Loss",
+                                     title_name="Train Loss of each 50 Step", x=step, y=train_loss, buf_size=50)
+    # loss
+    visdom_helper.update_line_smooth(x_axis_name="Step", y_axis_name="Loss", line_name="Train_Loss",
+                                     title_name="Train Loss of each 100 Step", x=step, y=train_loss, buf_size=100)
+    # 学习率
+    visdom_helper.update_line(x_axis_name="Step", y_axis_name="Learning Rate", line_name="Learning_Rate",
+                              title_name="Learning Rate", x=step, y=learning_rate)
+
+
+def input_feature_statistics(feature_list: list):
+    """
+    统计数据集的一些情况
+    :param examples: 数据列表
+    :return: 统计得到的字典
+    """
+    stat_result = dict()
+    stat_result["data_number"] = len(feature_list)  # 数据数量
+    stat_result["pos_example_number"] = len([f for f in feature_list if int(f.label)==1])  # 正例数量
+    stat_result["pos_rate"] = stat_result["pos_example_number"] / stat_result["data_number"] if stat_result["data_number"]!=0 else 0   # 正例比例
+    stat_result["neg_example_number"] = stat_result["data_number"] - stat_result["pos_example_number"]
+    stat_result["neg_rate"] = 1 - stat_result["pos_rate"]
+    return stat_result
+
 
 train_global_step = 0
 def my_main():
@@ -539,11 +598,14 @@ def my_main():
         ModelClass = DAST_SentenceTrigger
     else:
         ModelClass = None
-    if ModelClass is not None:
+
+    if ModelClass is not None and not args.load_trained:
         model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
+    elif ModelClass is not None and args.load_trained:
+        model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
     else:
         model = None
-        # raise ModuleNotFoundError("Please choose a model")  # todo
+        raise ModuleNotFoundError("Please choose a model")
 
     if args.fp16:
         model.half()
@@ -553,25 +615,19 @@ def my_main():
 
     # 准备绘图
     time_stamp = get_time_stamp()
-    visdom_helper = VisdomHelper(env=f"train BERT Sentence Matching: {time_stamp} {args.description}",
-                                 enable=args.draw_visdom)
+    visdom_helper = EasyVisdom(env_name=f"DAST env: %s %s " % (time_stamp, args.description), enable=args.draw_visdom)
 
     dev_BERT_dataloader = create_model_input_loader(feature_list=dev_features, batch_size=args.batch_size)
+    visdom_helper.show_dict(title_name="Command Line Arguments", dic=vars(args))
+    visdom_helper.show_dict(title_name="Eval Data Statistics", dic=input_feature_statistics(dev_features))
     if args.do_train:
         # 准备优化器
         optimizer = prepare_optimizer(
             model, fp16=args.fp16, loss_scale=args.loss_scale, learning_rate=args.learning_rate,
             warmup_proportion=args.warmup_proportion, num_train_optimization_steps=num_train_optimization_steps)
+        # train数据
         train_BERT_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
-
-        train_round = -1
-        epoch = -1
-        train_evals = dict()
-        dev_evals = dict()
-        train_cluster_evals = dict()
-        dev_cluster_evals = dict()
-        draw_acc_each_epoch = False
-        draw_acc_steps = num_train_optimization_steps / 100
+        visdom_helper.show_dict(title_name="Train Data Statistics", dic=input_feature_statistics(train_features))
 
         global global_train_step
         compare_dict = {"best_result": -1, "best_epoch": -1, "best_global_step": -1}
@@ -581,6 +637,7 @@ def my_main():
             "eval_result_each_epoch_on_train": dict(),
             "eval_result_each_epoch_on_dev": dict(),
         }
+
         # 训练开始前先eval一次
         train_result, train_pred = do_predict(
             model=model, device=device, BERT_dataloader=train_BERT_dataloader, feature_list=train_features)
@@ -588,6 +645,8 @@ def my_main():
             model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
         train_curve_datas["eval_result_each_epoch_on_train"][0] = train_result
         train_curve_datas["eval_result_each_epoch_on_dev"][0] = eval_result
+        draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=0, train_result=train_result, eval_result=eval_result)
+        # 训练
         for epoch in trange(1, int(args.num_train_epochs)+1, desc="Epoch"):
             do_train(
                 model=model, optimizer=optimizer, device=device, BERT_dataloader=train_BERT_dataloader,
@@ -604,18 +663,18 @@ def my_main():
             compare_with_checkpoint(
                 model=model, output_checkpoint_dir=args.train_output_dir, logger=logger, compare_dict=compare_dict,
                 eval_result=eval_result, epoch=epoch, global_step=global_train_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
+            draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=epoch, train_result=train_result, eval_result=eval_result)
         # 保存训练曲线的所有数据点
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
             json.dump(train_curve_datas, f)
+        # 展示最好结果
+        visdom_helper.show_dict(title_name="Best Eval Result", dic=train_curve_datas[compare_dict["best_epoch"]])
+        # load最好的模型
+        model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=2, ModelClass=ModelClass)
 
-    # todo: load
-    # todo: train结束后， load最好的模型再测一次
     if args.do_predict_only:
-        if args.load_trained:
-            model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
-        else:
-            model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
         eval_result, eval_pred = do_predict(model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+        visdom_helper.show_dict(title_name="Eval Result", dic=eval_result)
 
 def main():
     parser = argparse.ArgumentParser()

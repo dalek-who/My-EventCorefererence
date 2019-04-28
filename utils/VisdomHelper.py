@@ -2,7 +2,8 @@ from visdom import Visdom
 import numpy as np
 from collections import deque
 
-class VisdomLinePlotter(object):
+
+class EasyVisdom(object):
     """Plots to Visdom"""
     def __init__(self, env_name='main', enable=True):
         self.enable = enable
