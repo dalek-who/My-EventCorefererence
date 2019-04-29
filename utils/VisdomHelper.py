@@ -9,8 +9,8 @@ class EasyVisdom(object):
         self.enable = enable
         if not self.enable:
             return
-        self.viz = Visdom()
         self.env = env_name
+        self.viz = Visdom(env=env_name)
         self.tables = {}
         # mini-batch存在loss抖动的问题，可以几个batch求个平均loss
         self.buffer_dict = {}  # 对loss进行平滑
@@ -32,7 +32,7 @@ class EasyVisdom(object):
             self.tables[title_name] = self.viz.line(
                 X=np.array([x, x]),
                 Y=np.array([y, y]),
-                env=self.env,
+                # env=self.env,
                 opts=dict(
                     legend=[line_name],
                     title=title_name,
@@ -76,16 +76,18 @@ class EasyVisdom(object):
         if title_name not in self.tables:
             self.tables[title_name] = self.viz.text(
                 text="",
+                # env=self.env,
                 opts=dict(title=title_name))
         for k, v in dic.items():
             self.viz.text(
                 text="%s: %s" % (k, v),
+                # env=self.env,
                 win=self.tables[title_name],
                 append=True
             )
 
 
-# plotter = VisdomLinePlotter()
+# plotter = EasyVisdom(env_name="easy visdom")
 # train_loss = lambda x: x**2
 # eval_loss = lambda x: 1.5*x**2
 #

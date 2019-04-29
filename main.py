@@ -51,6 +51,7 @@ from configs import CONFIG
 from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
 from utils.coref_eval import evaluate_coref_from_example
 from models.clustering import connected_components_clustering, examples_to_predict_frame
+from utils.DrawMetricsPicture import result_visualize
 
 # 新加的
 from preprocessing.Structurize.EcbClass import EcbPlusTopView
@@ -64,19 +65,8 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
-
 def simple_accuracy(preds, labels):
     return (preds == labels).mean()
-
-
-def acc_and_f1(preds, labels):
-    acc = simple_accuracy(preds, labels)
-    f1 = f1_score(y_true=labels, y_pred=preds)
-    return {
-        "acc": acc,
-        "f1": f1,
-        "acc_and_f1": (acc + f1) / 2,
-    }
 
 
 def acc_and_f1_and_p_and_r(preds, labels):
@@ -91,14 +81,6 @@ def acc_and_f1_and_p_and_r(preds, labels):
         "f1": f1,
         "acc_and_f1": (acc + f1) / 2,
     }
-
-
-def compute_metrics(task_name, preds, labels):
-    assert len(preds) == len(labels)
-    if task_name == "mrpc":
-        return acc_and_f1_and_p_and_r(preds, labels)
-    else:
-        raise KeyError(task_name)
 
 
 def store_model_to_checkpoint(model, output_checkpoint_dir):
@@ -120,21 +102,6 @@ def load_model_from_checkpoint(load_checkpoint_dir, num_labels, ModelClass):
     model.load_state_dict(torch.load(load_model_file))
     logger.info("Load checkpoint: model parameters from %s" % load_model_file)
     return model
-
-
-def dataset_statistic(examples):
-    """
-    统计数据集的一些情况
-    :param examples: 数据列表
-    :return: 统计得到的字典
-    """
-    stat_result = dict()
-    stat_result["data_number"] = len(examples)  # 数据数量
-    stat_result["pos_example_number"] = len([ex for ex in examples if int(ex.label)==1])  # 正例数量
-    stat_result["pos_rate"] = 0 if stat_result["data_number"]==0 else stat_result["pos_example_number"] / stat_result["data_number"]  # 正例比例
-    stat_result["neg_example_number"] = stat_result["data_number"] - stat_result["pos_example_number"]
-    stat_result["neg_rate"] = 1 - stat_result["pos_rate"]
-    return stat_result
 
 
 def dataset_increase(examples: list, more: int, label: int=1):
@@ -159,84 +126,6 @@ def dataset_shuffle(examples: list):
     result = np.array(examples)
     np.random.shuffle(result)
     return result
-
-def do_eval(task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps, global_step, device):
-    logger.info("***** Running evaluation *****")
-    logger.info("  Num examples = %d", len(eval_examples))
-    logger.info("  Batch size = %d", args.eval_batch_size)
-    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-
-    if output_mode == "classification":
-        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-    elif output_mode == "regression":
-        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
-
-    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-    # Run prediction for full data
-    eval_sampler = SequentialSampler(eval_data)  # 按顺序依次采样
-    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-    model.eval()
-    eval_loss = 0
-    nb_eval_steps = 0
-    preds = []
-
-    for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-        input_ids = input_ids.to(device)
-        input_mask = input_mask.to(device)
-        segment_ids = segment_ids.to(device)
-        label_ids = label_ids.to(device)
-
-        with torch.no_grad():
-            logits = model(input_ids, segment_ids, input_mask, labels=None)
-
-        # create eval loss and other metric required by the task
-        if output_mode == "classification":
-            loss_fct = CrossEntropyLoss()
-            tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
-        elif output_mode == "regression":
-            loss_fct = MSELoss()
-            tmp_eval_loss = loss_fct(logits.view(-1), label_ids.view(-1))
-
-        eval_loss += tmp_eval_loss.mean().item()
-        nb_eval_steps += 1
-        if len(preds) == 0:
-            preds.append(logits.detach().cpu().numpy())
-        else:
-            preds[0] = np.append(
-                preds[0], logits.detach().cpu().numpy(), axis=0)
-
-    eval_loss = eval_loss / nb_eval_steps
-    preds = preds[0]
-    likelihood = preds.copy()
-    if output_mode == "classification":
-        preds = np.argmax(preds, axis=1)
-    elif output_mode == "regression":
-        preds = np.squeeze(preds)
-    result = compute_metrics(task_name, preds, all_label_ids.numpy())
-    loss = None if not args.do_train or nb_tr_steps==0 else tr_loss / nb_tr_steps
-
-    result['eval_loss'] = eval_loss
-    result['global_step'] = global_step
-    result['loss'] = loss
-    # coref result
-    coref_eval_result = evaluate_coref_from_example(eval_examples, preds)
-    result = dict(result, **coref_eval_result)
-    return result, preds, likelihood
-
-
-def do_eval_cluster(task_name, eval_examples, preds, return_df=False):
-    true_example_label = np.array([int(e.label) for e in eval_examples])
-    pred_frame = examples_to_predict_frame(eval_examples, preds)
-    cluster_frame = connected_components_clustering(pred_frame)
-    cluster_preds = cluster_frame["# pred label"].astype(int).to_numpy()
-    cluster_result = compute_metrics(task_name, cluster_preds, true_example_label)
-    if return_df:
-        return cluster_result, cluster_preds, cluster_frame
-    else:
-        return cluster_result, cluster_preds
 
 
 def create_model_input_loader(feature_list: list, batch_size):
@@ -293,7 +182,7 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
         # 绘图
         draw_visdom_each_step(
             visdom_helper=visdom_helper, step=train_global_step,
-            train_loss=loss.detach().cpu().item(), learning_rate=learning_rate)
+            train_loss=loss_each_step[train_global_step], learning_rate=learning_rate_each_step[train_global_step])
 
 
 def do_predict(model, device, BERT_dataloader, feature_list: list):
@@ -346,7 +235,7 @@ def prepare_optimizer(model, fp16: bool, loss_scale: float, learning_rate: float
             raise ImportError(
                 "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
 
-        optimizer = FusedAdam(optimizer_grouped_parameters, lr=args.learning_rate, bias_correction=False,
+        optimizer = FusedAdam(optimizer_grouped_parameters, lr=learning_rate, bias_correction=False,
                               max_grad_norm=1.0)
         if loss_scale == 0:
             optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
@@ -361,7 +250,7 @@ def prepare_optimizer(model, fp16: bool, loss_scale: float, learning_rate: float
 def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: dict, eval_result: dict,
                             epoch: int, global_step: int, by_what: str="CoNLL_f1"):
     if eval_result[by_what] > compare_dict["best_result"]:
-        logger.info(f"********** best model with {by_what}={eval_result[by_what]}, update checkpoint **********")
+        logger.info(f"********** best model at Epoch {epoch} with {by_what}={eval_result[by_what]}, update checkpoint **********")
         for k, v in eval_result.items():
             logger.info("%s = %s" % (k, v))
         compare_dict["best_result"] = eval_result[by_what]
@@ -578,11 +467,13 @@ def my_main():
         raise ValueError("--coref_level=%s is invalid" % args.coref_level)
 
     # 准备数据
+    dataset_statistics_dict = dict()  # 统计数据集
     feature_creator = InputFeaturesCreator(ECBPlus=EcbPlusTopView())
     logger.info("*******  Create eval features  ******")
     dev_features = feature_creator.create_from_dataset(
         topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
         max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+    dataset_statistics_dict["dev"] = input_feature_statistics(dev_features)
 
     num_train_optimization_steps = 0
     train_features = []
@@ -591,6 +482,8 @@ def my_main():
         train_features = feature_creator.create_from_dataset(
             topics=CONFIG.topics_train, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
             max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+        dataset_statistics_dict["train"] = input_feature_statistics(train_features)
+        dataset_statistics_dict["train"]["positive_increase"] = args.increase_positive
         num_train_optimization_steps = int(len(train_features) / args.batch_size) * args.num_train_epochs
         if args.increase_positive >= 1:  # 扩增正例
             train_features = dataset_increase(examples=train_features, more=args.increase_positive, label=1)
@@ -669,12 +562,20 @@ def my_main():
                 model=model, output_checkpoint_dir=args.train_output_dir, logger=logger, compare_dict=compare_dict,
                 eval_result=eval_result, epoch=epoch, global_step=train_global_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
             draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=epoch, train_result=train_result, eval_result=eval_result)
-        # 保存训练曲线的所有数据点
+        # 保存训练曲线的所有数据点,包括每个step的loss和学习率，每个epoch的测评
+        result_visualize(curve_data_dict=train_curve_datas, output_dir=args.train_output_dir)  # 存储为图片
         best_eval_result =  train_curve_datas["eval_result_each_epoch_on_dev"][compare_dict["best_epoch"]]
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
-            json.dump(train_curve_datas, f)
+            json.dump(train_curve_datas, f)  # 学习率list点太多，不自动缩进了
+        # 保存最好结果
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_BEST_EVAL_RESULT_FILE_NAME), "w") as f:
             json.dump(best_eval_result, f, indent=4)
+        # 保存对数据集的统计
+        with open(os.path.join(args.train_output_dir, CONFIG.DATASET_STATISTICS_FILE_NAME), "w") as f:
+            json.dump(dataset_statistics_dict, f, indent=4)
+        # 保存命令行参数选项
+        with open(os.path.join(args.train_output_dir, CONFIG.COMMAND_LINE_ARGUMENTS_FILE_NAME), "w") as f:
+            json.dump(vars(args), f, indent=4)
         # 展示最好结果
         visdom_helper.show_dict(title_name="Best Eval Result", dic=best_eval_result)
         # load最好的模型
@@ -683,785 +584,6 @@ def my_main():
     if args.do_predict_only:
         eval_result, eval_pred = do_predict(model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
         visdom_helper.show_dict(title_name="Eval Result", dic=eval_result)
-
-def main():
-    parser = argparse.ArgumentParser()
-
-    ## Required parameters
-    parser.add_argument("--bert_model", default=None, type=str, required=True,
-                        help="Bert pre-trained model selected in the list: bert-base-uncased, "
-                             "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
-                             "bert-base-multilingual-cased, bert-base-chinese.")
-    parser.add_argument("--task_name",
-                        default=None,
-                        type=str,
-                        required=True,
-                        help="The name of the task to train.")
-    ## Other parameters
-    parser.add_argument("--cache_dir",
-                        default="",
-                        type=str,
-                        help="Where do you want to store the pre-trained models downloaded from s3")
-    parser.add_argument("--max_seq_length",
-                        default=128,
-                        type=int,
-                        help="The maximum total input sequence length after WordPiece tokenization. \n"
-                             "Sequences longer than this will be truncated, and sequences shorter \n"
-                             "than this will be padded.")
-    parser.add_argument("--do_train",
-                        action='store_true',
-                        help="Whether to run training.")
-    parser.add_argument("--do_eval",
-                        action='store_true',
-                        help="Whether to run eval on the dev set.")
-    parser.add_argument("--do_predict",
-                        action='store_true',
-                        help="Whether to run predict on the dev set.")
-    parser.add_argument("--do_lower_case",
-                        action='store_true',
-                        help="Set this flag if you are using an uncased model.")
-    parser.add_argument("--train_batch_size",
-                        default=32,
-                        type=int,
-                        help="Total batch size for training.")
-    parser.add_argument("--eval_batch_size",
-                        default=8,
-                        type=int,
-                        help="Total batch size for eval.")
-    parser.add_argument("--learning_rate",
-                        default=5e-5,
-                        type=float,
-                        help="The initial learning rate for Adam.")
-    parser.add_argument("--num_train_epochs",
-                        default=3.0,
-                        type=float,
-                        help="Total number of training epochs to perform.")
-    parser.add_argument("--warmup_proportion",
-                        default=0.1,
-                        type=float,
-                        help="Proportion of training to perform linear learning rate warmup for. "
-                             "E.g., 0.1 = 10%% of training.")
-    parser.add_argument("--no_cuda",
-                        action='store_true',
-                        help="Whether not to use CUDA when available")
-    parser.add_argument("--local_rank",
-                        type=int,
-                        default=-1,
-                        help="local_rank for distributed training on gpus")
-    parser.add_argument('--seed',
-                        type=int,
-                        default=42,
-                        help="random seed for initialization")
-    parser.add_argument('--gradient_accumulation_steps',
-                        type=int,
-                        default=1,
-                        help="Number of updates steps to accumulate before performing a backward/update pass.")
-    parser.add_argument('--fp16',
-                        action='store_true',
-                        help="Whether to use 16-bit float precision instead of 32-bit")
-    parser.add_argument('--loss_scale',
-                        type=float, default=0,
-                        help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
-                             "0 (default value): dynamic loss scaling.\n"
-                             "Positive power of 2: static loss scaling value.\n")
-    parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
-    parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
-    parser.add_argument("--auto_choose_gpu",
-                        action='store_true',
-                        help="Whether to automatically choose GPU.")
-    parser.add_argument("--load_trained",
-                        action='store_true',
-                        help="Whether to load fine-turned model.")
-    parser.add_argument("--load_model_dir",
-                        default="",
-                        type=str,
-                        help="Directory where do you want to load the fine-turned model parameters")
-    parser.add_argument("--predict_output_dir",
-                        default="",
-                        type=str,
-                        help="Directory where do you want to store the predict result")
-    parser.add_argument("--train_output_dir",
-                        default="",
-                        type=str,
-                        help="The output directory for train where the model predictions and checkpoints will be written.")
-    parser.add_argument("--coref_level",
-                        required=True,
-                        type=str,
-                        help="Which level's coreference, could be 'within_document', 'cross_document', 'cross_topic'")
-    parser.add_argument("--description",
-                        default="",
-                        type=str,
-                        help="Description of this experiment")
-    parser.add_argument("--eval_data_dir",
-                        default="",
-                        type=str,
-                        help="The input data dir for evaluate. Should contain the .tsv files (or other data files) for the task.")
-    parser.add_argument("--train_data_dir",
-                        default="",
-                        type=str,
-                        help="The input data dir for train. Should contain the .tsv files (or other data files) for the task.")
-    parser.add_argument("--increase_positive",
-                        default=0,
-                        type=int,
-                        help="How many times positive examples should be increased.")
-    parser.add_argument("--draw_visdom",
-                        action="store_true",
-                        help="Weather to use visdom to draw.")
-    parser.add_argument("--do_cluster",
-                        action="store_true",
-                        help="Weather to do graph connection component cluster.")
-    args = parser.parse_args()
-
-    if args.server_ip and args.server_port:
-        # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
-        import ptvsd
-        print("Waiting for debugger attach")
-        ptvsd.enable_attach(address=(args.server_ip, args.server_port), redirect_output=True)
-        ptvsd.wait_for_attach()
-
-    processors = {
-        "mrpc": MrpcProcessor,  # 判断两个句子是否语义等价。和我的coreference任务最接近
-    }
-
-    output_modes = {
-        "mrpc": "classification",
-    }
-
-    if args.local_rank == -1 or args.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        n_gpu = torch.cuda.device_count()
-    else:
-        torch.cuda.set_device(args.local_rank)
-        device = torch.device("cuda", args.local_rank)
-        n_gpu = 1
-        # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl')
-    logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
-        device, n_gpu, bool(args.local_rank != -1), args.fp16))
-
-    if args.gradient_accumulation_steps < 1:
-        raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
-            args.gradient_accumulation_steps))
-
-    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-
-    if not args.do_train and not args.do_predict:
-        raise ValueError("At least one of `do_train` or `do_predict` must be True.")
-
-    if os.path.exists(args.train_output_dir) and os.listdir(args.train_output_dir) and args.do_train:
-        raise ValueError("Train output directory ({}) already exists and is not empty.".format(args.train_output_dir))
-    if args.do_train and not os.path.exists(args.train_output_dir):
-        os.makedirs(args.train_output_dir)
-
-    if os.path.exists(args.predict_output_dir) and os.listdir(args.predict_output_dir) and args.do_eval:
-        raise ValueError("Predict output directory ({}) already exists and is not empty.".format(args.train_output_dir))
-    if args.do_predict and not os.path.exists(args.predict_output_dir):
-        os.makedirs(args.predict_output_dir)
-
-    task_name = args.task_name.lower()
-
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % (task_name))
-
-    processor = processors[task_name]()
-    output_mode = output_modes[task_name]
-
-    label_list = processor.get_labels()
-    num_labels = len(label_list)
-
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
-
-    train_examples = None
-    num_train_optimization_steps = None
-    if args.do_train:
-        train_examples = processor.get_train_examples(args.train_data_dir)
-        if args.increase_positive >= 1:  # 扩增正例
-            train_examples = dataset_increase(examples=train_examples, more=args.increase_positive, label=1)
-        num_train_optimization_steps = int(
-            len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
-        if args.local_rank != -1:
-            num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
-
-    # Prepare model
-    cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE),
-                                                                   'distributed_{}'.format(args.local_rank))
-    model = BertForSequenceClassification.from_pretrained(args.bert_model,
-                                                          cache_dir=cache_dir,
-                                                          num_labels=num_labels)
-    if args.fp16:
-        model.half()
-    model.to(device)
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError(
-                "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        model = DDP(model)
-    elif n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
-    # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
-    if args.fp16:
-        try:
-            from apex.optimizers import FP16_Optimizer
-            from apex.optimizers import FusedAdam
-        except ImportError:
-            raise ImportError(
-                "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        optimizer = FusedAdam(optimizer_grouped_parameters,
-                              lr=args.learning_rate,
-                              bias_correction=False,
-                              max_grad_norm=1.0)
-        if args.loss_scale == 0:
-            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-        else:
-            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
-
-    else:
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=num_train_optimization_steps)
-
-    # 测试数据
-    eval_examples = processor.get_dev_examples(args.eval_data_dir)
-    eval_features = convert_examples_to_features(
-        eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
-
-    time_stamp = get_time_stamp()
-    visdom_helper = VisdomHelper(env=f"train BERT Sentence Matching: {time_stamp} {args.description}", enable=args.draw_visdom)
-    global_step = 0
-    nb_tr_steps = 0
-    tr_loss = 0
-    if args.do_train:
-        train_features = convert_examples_to_features(
-            train_examples, label_list, args.max_seq_length, tokenizer, output_mode)
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(train_examples))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_optimization_steps)
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-
-        if output_mode == "classification":
-            all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-        elif output_mode == "regression":
-            all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.float)
-
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-        if args.local_rank == -1:
-            train_sampler = RandomSampler(train_data)
-        else:
-            train_sampler = DistributedSampler(train_data)
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
-
-        model.train()
-        # visdom展示此次训练的命令行参数和训练数据统计
-        train_examples_stat = dataset_statistic(examples=train_examples)
-        visdom_helper.show_dict(text_name="args", dic=vars(args))
-        visdom_helper.show_dict(text_name="train dataset statistics", dic=train_examples_stat)
-        best_dict = {  # 记录什么时候达到最好结果
-            "best_dev_epoch": 0,
-            "best_dev_acc": -1.,
-
-            "best_train_epoch": 0,
-            "best_train_acc": -1.,
-
-            "best_dev_epoch_cluster": 0,
-            "best_dev_acc_cluster": -1.,
-
-            "best_train_epoch_cluster": 0,
-            "best_train_acc_cluster": -1.,
-
-            "best_dev_BLANC_f1_epoch": 0,
-            "best_dev_BLANC_f1": -1,
-        }
-        # 开始训练前先画一个acc点
-        train_round = -1
-        epoch = -1
-        train_result, train_preds, train_likelihood = do_eval(
-            task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss,
-            nb_tr_steps,
-            global_step, device)
-        visdom_helper.update_line(line_name="train_acc_epoch", round=epoch, value=train_result["acc"])
-        visdom_helper.update_line(line_name="train_f1_epoch", round=epoch, value=train_result["f1"])
-        visdom_helper.update_line(line_name="loss_on_train_set_epoch", round=epoch, value=train_result["eval_loss"])
-        visdom_helper.update_line(line_name="train_B-cubed_f1_epoch", round=epoch, value=train_result["B-cubed_f1"])
-        visdom_helper.update_line(line_name="train_MUC_f1_epoch", round=epoch, value=train_result["MUC_f1"])
-        visdom_helper.update_line(line_name="train_CEAFe_f1_epoch", round=epoch, value=train_result["CEAFe_f1"])
-        visdom_helper.update_line(line_name="train_CEAFm_f1_epoch", round=epoch, value=train_result["CEAFm_f1"])
-        visdom_helper.update_line(line_name="train_BLANCc_f1_epoch", round=epoch, value=train_result["BLANCc_f1"])
-        visdom_helper.update_line(line_name="train_BLANCn_f1_epoch", round=epoch, value=train_result["BLANCn_f1"])
-        visdom_helper.update_line(line_name="train_BLANC_f1_epoch", round=epoch, value=train_result["BLANC_f1"])
-        visdom_helper.update_line(line_name="train_CoNLL_f1_epoch", round=epoch, value=train_result["CoNLL_f1"])
-        visdom_helper.update_line(line_name="train_AVG_f1_epoch", round=epoch, value=train_result["AVG_f1"])
-
-
-        # visdom_helper.update_line(line_name="train_acc_step", round=train_round, value=train_result["acc"])
-        # visdom_helper.update_line(line_name="train_f1_step", round=train_round, value=train_result["f1"])
-        # visdom_helper.update_line(line_name="loss_on_train_set_step", round=train_round, value=train_result["eval_loss"])
-        # visdom_helper.update_line(line_name="train_B-cubed_f1_step", round=train_round, value=train_result["B-cubed_f1"])
-        # visdom_helper.update_line(line_name="train_MUC_f1_step", round=train_round, value=train_result["MUC_f1"])
-        # visdom_helper.update_line(line_name="train_CEAFe_f1_step", round=train_round, value=train_result["CEAFe_f1"])
-        # visdom_helper.update_line(line_name="train_CEAFm_f1_step", round=train_round, value=train_result["CEAFm_f1"])
-        # visdom_helper.update_line(line_name="train_BLANC_f1_step", round=train_round, value=train_result["BLANC_f1"])
-
-        # dev集
-        dev_result, dev_preds, dev_likelihood = do_eval(
-            task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss,
-            nb_tr_steps,
-            global_step, device)
-        visdom_helper.update_line(line_name="dev_acc_epoch", round=epoch, value=dev_result["acc"])
-        visdom_helper.update_line(line_name="dev_f1_epoch", round=epoch, value=dev_result["f1"])
-        visdom_helper.update_line(line_name="loss_on_dev_set_epoch", round=epoch, value=dev_result["eval_loss"])
-        visdom_helper.update_line(line_name="dev_B-cubed_f1_epoch", round=epoch, value=dev_result["B-cubed_f1"])
-        visdom_helper.update_line(line_name="dev_MUC_f1_epoch", round=epoch, value=dev_result["MUC_f1"])
-        visdom_helper.update_line(line_name="dev_CEAFe_f1_epoch", round=epoch, value=dev_result["CEAFe_f1"])
-        visdom_helper.update_line(line_name="dev_CEAFm_f1_epoch", round=epoch, value=dev_result["CEAFm_f1"])
-        visdom_helper.update_line(line_name="dev_BLANCc_f1_epoch", round=epoch, value=dev_result["BLANCc_f1"])
-        visdom_helper.update_line(line_name="dev_BLANCn_f1_epoch", round=epoch, value=dev_result["BLANCn_f1"])
-        visdom_helper.update_line(line_name="dev_BLANC_f1_epoch", round=epoch, value=dev_result["BLANC_f1"])
-        visdom_helper.update_line(line_name="dev_CoNLL_f1_epoch", round=epoch, value=dev_result["CoNLL_f1"])
-        visdom_helper.update_line(line_name="dev_AVG_f1_epoch", round=epoch, value=dev_result["AVG_f1"])
-
-        # visdom_helper.update_line(line_name="dev_acc_step", round=train_round, value=dev_result["acc"])
-        # visdom_helper.update_line(line_name="dev_f1_step", round=train_round, value=dev_result["f1"])
-        # visdom_helper.update_line(line_name="loss_on_dev_set_step", round=train_round, value=dev_result["eval_loss"])
-        # visdom_helper.update_line(line_name="dev_B-cubed_f1_step", round=train_round, value=dev_result["B-cubed_f1"])
-        # visdom_helper.update_line(line_name="dev_MUC_f1_step", round=train_round, value=dev_result["MUC_f1"])
-        # visdom_helper.update_line(line_name="dev_CEAFe_f1_step", round=train_round, value=dev_result["CEAFe_f1"])
-        # visdom_helper.update_line(line_name="dev_CEAFm_f1_step", round=train_round, value=dev_result["CEAFm_f1"])
-        # visdom_helper.update_line(line_name="dev_BLANC_f1_step", round=train_round, value=dev_result["BLANC_f1"])
-
-        train_round = -1
-        epoch = -1
-        train_evals = dict()
-        dev_evals = dict()
-        train_cluster_evals = dict()
-        dev_cluster_evals = dict()
-        draw_acc_each_epoch = False
-        draw_acc_steps = num_train_optimization_steps / 100
-        for epoch in trange(int(args.num_train_epochs), desc="Epoch"):
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
-                train_round += 1
-                batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, label_ids = batch
-
-                # define a new function to compute loss values for both output_modes
-                logits = model(input_ids, segment_ids, input_mask, labels=None)
-
-                if output_mode == "classification":
-                    loss_fct = CrossEntropyLoss()
-                    loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
-                elif output_mode == "regression":
-                    loss_fct = MSELoss()
-                    loss = loss_fct(logits.view(-1), label_ids.view(-1))
-
-                if n_gpu > 1:
-                    loss = loss.mean()  # mean() to average on multi-gpu.
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-
-                if args.fp16:
-                    optimizer.backward(loss)
-                else:
-                    loss.backward()
-
-                tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
-                nb_tr_steps += 1
-                # train loss图
-                # 每个batch画一个
-                visdom_helper.update_line(line_name="train_loss", round=train_round, value=loss.item())
-                visdom_helper.update_scatter(line_name="train_loss_scatter", round=train_round, value=loss.item())
-                # 每n个batch画一个
-                visdom_helper.update_line_average(line_name="train_loss_average-6", round=train_round,
-                                                  value=loss.item(), buf_size=6)
-                visdom_helper.update_line_average(line_name="train_loss_average-5", round=train_round,
-                                                  value=loss.item(), buf_size=5)
-                visdom_helper.update_line_average(line_name="train_loss_average-10", round=train_round,
-                                                  value=loss.item(), buf_size=10)
-                visdom_helper.update_line_average(line_name="train_loss_average-11", round=train_round,
-                                                  value=loss.item(), buf_size=11)
-                visdom_helper.update_line_average(line_name="train_loss_average-50", round=train_round,
-                                                  value=loss.item(), buf_size=50)
-                visdom_helper.update_line_average(line_name="train_loss_average-100", round=train_round,
-                                                  value=loss.item(), buf_size=100)
-                # 每n个点做平滑
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-3", round=train_round,
-                                                 value=loss.item(), buf_size=3)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-6", round=train_round,
-                                                 value=loss.item(), buf_size=6)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-5", round=train_round,
-                                                 value=loss.item(), buf_size=5)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-10", round=train_round,
-                                                 value=loss.item(), buf_size=10)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-11", round=train_round,
-                                                 value=loss.item(), buf_size=11)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-50", round=train_round,
-                                                 value=loss.item(), buf_size=50)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-100", round=train_round,
-                                                 value=loss.item(), buf_size=100)
-                visdom_helper.update_line_smooth(line_name="train_loss_smooth-3", round=train_round,
-                                                 value=loss.item(), buf_size=3)
-                # 总平均loss变化
-                visdom_helper.update_line_total_average(line_name="train_loss_total_average", round=train_round,
-                                                        value=loss.item())
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
-                        # modify learning rate with special warm up BERT uses
-                        # if args.fp16 is False, BertAdam is used that handles this automatically
-                        lr_this_step = args.learning_rate * warmup_linear(global_step / num_train_optimization_steps,
-                                                                          args.warmup_proportion)
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr_this_step
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-                    current_lr = args.learning_rate * warmup_linear(global_step / num_train_optimization_steps,
-                                                                          args.warmup_proportion)  # 当前的学习率(BertAdam)里会自动完成这步
-                    visdom_helper.update_line(line_name="learning rate", round=train_round, value=current_lr)
-
-                    # 训练中画acc曲线
-                    # if not draw_acc_each_epoch and train_round % draw_acc_steps==0 or step == len(train_dataloader)-1:
-                    #     train_result, train_preds, train_likelihood = do_eval(
-                    #         task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss,
-                    #         nb_tr_steps,
-                    #         global_step, device)
-                    #     visdom_helper.update_line(line_name="train_acc_step", round=train_round, value=train_result["acc"])
-                    #     visdom_helper.update_line(line_name="train_f1_step", round=train_round, value=train_result["f1"])
-                    #     visdom_helper.update_line(line_name="loss_on_train_set_step", round=train_round,
-                    #                               value=train_result["eval_loss"])
-                    #     visdom_helper.update_line(line_name="train_B-cubed_f1_step", round=train_round,
-                    #                               value=train_result["B-cubed_f1"])
-                    #     visdom_helper.update_line(line_name="train_MUC_f1_step", round=train_round,
-                    #                               value=train_result["MUC_f1"])
-                    #     visdom_helper.update_line(line_name="train_CEAFe_f1_step", round=train_round,
-                    #                               value=train_result["CEAFe_f1"])
-                    #     visdom_helper.update_line(line_name="train_CEAFm_f1_step", round=train_round,
-                    #                               value=train_result["CEAFm_f1"])
-                    #     visdom_helper.update_line(line_name="train_BLANC_f1_step", round=train_round,
-                    #                               value=train_result["BLANC_f1"])
-                    #
-                    #     # dev集
-                    #     dev_result, dev_preds, dev_likelihood = do_eval(
-                    #         task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss,
-                    #         nb_tr_steps,
-                    #         global_step, device)
-                    #     visdom_helper.update_line(line_name="dev_acc_step", round=train_round, value=dev_result["acc"])
-                    #     visdom_helper.update_line(line_name="dev_f1_step", round=train_round, value=dev_result["f1"])
-                    #     visdom_helper.update_line(line_name="loss_on_dev_set_step", round=train_round,
-                    #                               value=dev_result["eval_loss"])
-                    #     visdom_helper.update_line(line_name="dev_B-cubed_f1_step", round=train_round,
-                    #                               value=dev_result["B-cubed_f1"])
-                    #     visdom_helper.update_line(line_name="dev_MUC_f1_step", round=train_round,
-                    #                               value=dev_result["MUC_f1"])
-                    #     visdom_helper.update_line(line_name="dev_CEAFe_f1_step", round=train_round,
-                    #                               value=dev_result["CEAFe_f1"])
-                    #     visdom_helper.update_line(line_name="dev_CEAFm_f1_step", round=train_round,
-                    #                               value=dev_result["CEAFm_f1"])
-                    #     visdom_helper.update_line(line_name="dev_BLANC_f1_step", round=train_round,
-                    #                               value=dev_result["BLANC_f1"])
-                    #
-                    #     # 为防止因为总是测试导致训练过慢，当dev acc高于一个阈值后就只每个epoch画一个
-                    #     if dev_result["acc"] >= CONFIG.DRAW_ACC_THRESHOLD:
-                    #         draw_acc_each_epoch = True
-
-            # 评估模型, 画在train集和dev集上的eval曲线图
-            # train集
-            train_result, train_preds, train_likelihood = do_eval(
-                task_name, args, train_examples, train_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
-                global_step, device)
-            train_cluster_result, train_cluster_preds = do_eval_cluster(task_name, train_examples, train_preds)
-            visdom_helper.update_line(line_name="train_acc_epoch", round=epoch, value=train_result["acc"])
-            visdom_helper.update_line(line_name="train_f1_epoch", round=epoch, value=train_result["f1"])
-            visdom_helper.update_line(line_name="loss_on_train_set_epoch", round=epoch, value=train_result["eval_loss"])
-            visdom_helper.update_line(line_name="train_acc_cluster_epoch", round=epoch, value=train_cluster_result["acc"])
-            visdom_helper.update_line(line_name="train_f1_cluster_epoch", round=epoch, value=train_cluster_result["f1"])
-            visdom_helper.update_line(line_name="train_B-cubed_f1_epoch", round=epoch, value=train_result["B-cubed_f1"])
-            visdom_helper.update_line(line_name="train_MUC_f1_epoch", round=epoch, value=train_result["MUC_f1"])
-            visdom_helper.update_line(line_name="train_CEAFe_f1_epoch", round=epoch, value=train_result["CEAFe_f1"])
-            visdom_helper.update_line(line_name="train_CEAFm_f1_epoch", round=epoch, value=train_result["CEAFm_f1"])
-            visdom_helper.update_line(line_name="train_BLANCc_f1_epoch", round=epoch, value=train_result["BLANCc_f1"])
-            visdom_helper.update_line(line_name="train_BLANCn_f1_epoch", round=epoch, value=train_result["BLANCn_f1"])
-            visdom_helper.update_line(line_name="train_BLANC_f1_epoch", round=epoch, value=train_result["BLANC_f1"])
-            visdom_helper.update_line(line_name="train_CoNLL_f1_epoch", round=epoch, value=train_result["CoNLL_f1"])
-            visdom_helper.update_line(line_name="train_AVG_f1_epoch", round=epoch, value=train_result["AVG_f1"])
-
-            train_evals[epoch] = train_result
-            train_cluster_evals[epoch] = train_cluster_result
-            # dev集
-            dev_result, dev_preds, dev_likelihood = do_eval(
-                task_name, args, eval_examples, eval_features, model, output_mode, num_labels, tr_loss, nb_tr_steps,
-                global_step, device)
-            dev_cluster_result, dev_cluster_preds = do_eval_cluster(task_name, eval_examples, dev_preds)
-            visdom_helper.update_line(line_name="dev_acc_epoch", round=epoch, value=dev_result["acc"])
-            visdom_helper.update_line(line_name="dev_f1_epoch", round=epoch, value=dev_result["f1"])
-            visdom_helper.update_line(line_name="loss_on_dev_set_epoch", round=epoch, value=dev_result["eval_loss"])
-            visdom_helper.update_line(line_name="dev_acc_cluster_epoch", round=epoch, value=dev_cluster_result["acc"])
-            visdom_helper.update_line(line_name="dev_f1_cluster_epoch", round=epoch, value=dev_cluster_result["f1"])
-            visdom_helper.update_line(line_name="dev_B-cubed_f1_epoch", round=epoch, value=dev_result["B-cubed_f1"])
-            visdom_helper.update_line(line_name="dev_MUC_f1_epoch", round=epoch, value=dev_result["MUC_f1"])
-            visdom_helper.update_line(line_name="dev_CEAFe_f1_epoch", round=epoch, value=dev_result["CEAFe_f1"])
-            visdom_helper.update_line(line_name="dev_CEAFm_f1_epoch", round=epoch, value=dev_result["CEAFm_f1"])
-            visdom_helper.update_line(line_name="dev_BLANCc_f1_epoch", round=epoch, value=dev_result["BLANCc_f1"])
-            visdom_helper.update_line(line_name="dev_BLANCn_f1_epoch", round=epoch, value=dev_result["BLANCn_f1"])
-            visdom_helper.update_line(line_name="dev_BLANC_f1_epoch", round=epoch, value=dev_result["BLANC_f1"])
-            visdom_helper.update_line(line_name="dev_CoNLL_f1_epoch", round=epoch, value=dev_result["CoNLL_f1"])
-            visdom_helper.update_line(line_name="dev_AVG_f1_epoch", round=epoch, value=dev_result["AVG_f1"])
-
-            dev_evals[epoch] = dev_result
-            dev_cluster_evals[epoch] = dev_cluster_result
-
-            # 把目前为止在dev上acc最好的模型保存为checkpoint
-            if train_result["acc"] > best_dict["best_train_acc"]:
-                best_dict["best_train_acc"] = train_result["acc"]
-                best_dict["best_train_epoch"] = epoch
-            if train_cluster_result["acc"] > best_dict["best_train_acc_cluster"]:
-                best_dict["best_train_acc_cluster"] = train_cluster_result["acc"]
-                best_dict["best_train_epoch_cluster"] = epoch
-            if dev_cluster_result["acc"] > best_dict["best_dev_acc_cluster"]:
-                best_dict["best_dev_acc_cluster"] = dev_cluster_result["acc"]
-                best_dict["best_dev_epoch_cluster"] = epoch
-            # 依据dev BLANC f1保存checkpoint
-            if dev_result["BLANC_f1"] > best_dict["best_dev_BLANC_f1"]:
-                best_dict["best_dev_BLANC_f1"] = dev_result["BLANC_f1"]
-                best_dict["best_dev_BLANC_f1_epoch"] = epoch
-                store_model_to_checkpoint(model, output_checkpoint_dir=args.train_output_dir)
-                # 分类评测
-                best_dev_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
-                with open(best_dev_eval_file, "w") as writer:
-                    logger.info("*****Best Dev Eval Results, save checkpoint *****")
-                    for key in sorted(dev_result.keys()):
-                        logger.info("  %s = %s", key, str(dev_result[key]))
-                        writer.write("%s = %s\n" % (key, str(dev_result[key])))
-                    for key in sorted(dev_cluster_result.keys()):
-                        logger.info("  cluster %s = %s", key, str(dev_cluster_result[key]))
-                        writer.write("cluster %s = %s\n" % (key, str(dev_cluster_result[key])))
-
-        # Load a trained model and config that you have fine-tuned
-        model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=num_labels)
-
-        visdom_helper.show_dict(text_name="training_log", dic=best_dict)
-        visdom_helper.show_dict(text_name="best_dev_eval_result", dic=dev_evals[best_dict["best_dev_BLANC_f1_epoch"]])
-        visdom_helper.show_dict(text_name="best_dev_eval_result_cluster", dic=dev_cluster_evals[best_dict["best_dev_epoch_cluster"]])
-        # 实验记录
-        generate_record(
-            table_name="train_BERT",
-            coref_level=args.coref_level,
-            input_data_path=os.path.join(args.train_data_dir, "train.tsv"),
-            model_parameter_path=args.train_output_dir,
-            args_dict=vars(args),
-            time_stamp=time_stamp)
-
-    elif args.load_trained:
-        # Load a trained model and config that you have fine-tuned
-        model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=num_labels)
-    else:
-        model = BertForSequenceClassification.from_pretrained(args.bert_model, num_labels=num_labels)
-    model.to(device)
-
-    if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # logger.info("***** Running evaluation *****")
-        # logger.info("  Num examples = %d", len(eval_examples))
-        # logger.info("  Batch size = %d", args.eval_batch_size)
-        # all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        # all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        # all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        #
-        # if output_mode == "classification":
-        #     all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-        # elif output_mode == "regression":
-        #     all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.float)
-        #
-        # eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-        # # Run prediction for full data
-        # eval_sampler = SequentialSampler(eval_data)  # 按顺序依次采样
-        # eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-        #
-        # model.eval()
-        # eval_loss = 0
-        # nb_eval_steps = 0
-        # preds = []
-        #
-        # for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-        #     input_ids = input_ids.to(device)
-        #     input_mask = input_mask.to(device)
-        #     segment_ids = segment_ids.to(device)
-        #     label_ids = label_ids.to(device)
-        #
-        #     with torch.no_grad():
-        #         logits = model(input_ids, segment_ids, input_mask, labels=None)
-        #
-        #     # create eval loss and other metric required by the task
-        #     if output_mode == "classification":
-        #         loss_fct = CrossEntropyLoss()
-        #         tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
-        #     elif output_mode == "regression":
-        #         loss_fct = MSELoss()
-        #         tmp_eval_loss = loss_fct(logits.view(-1), label_ids.view(-1))
-        #
-        #     eval_loss += tmp_eval_loss.mean().item()
-        #     nb_eval_steps += 1
-        #     if len(preds) == 0:
-        #         preds.append(logits.detach().cpu().numpy())
-        #     else:
-        #         preds[0] = np.append(
-        #             preds[0], logits.detach().cpu().numpy(), axis=0)
-        #
-        # eval_loss = eval_loss / nb_eval_steps
-        # preds = preds[0]
-        # likelihood = preds.copy()
-        # if output_mode == "classification":
-        #     preds = np.argmax(preds, axis=1)
-        # elif output_mode == "regression":
-        #     preds = np.squeeze(preds)
-        # result = compute_metrics(task_name, preds, all_label_ids.numpy())
-        # loss = tr_loss / nb_tr_steps if args.do_train else None
-        #
-        # result['eval_loss'] = eval_loss
-        # result['global_step'] = global_step
-        # result['loss'] = loss
-
-        result, preds, likelihood = do_eval(task_name, args, eval_examples, eval_features, model, output_mode,
-                                            num_labels, tr_loss, nb_tr_steps, global_step, device)
-        result_cluster, preds_cluster, cluster_frame = do_eval_cluster(task_name, eval_examples, preds, return_df=True)
-        # if args.do_train:
-        #     train_eval_file = os.path.join(args.train_output_dir, "eval_results.txt")
-        #     with open(train_eval_file, "w") as writer:
-        #         logger.info("***** Eval results *****")
-        #         for key in sorted(result.keys()):
-        #             logger.info("  %s = %s", key, str(result[key]))
-        #             writer.write("%s = %s\n" % (key, str(result[key])))
-        # 绘制eval结果
-        eval_examples_stat = dataset_statistic(eval_examples)
-        visdom_helper.show_dict(text_name="eval_result", dic=result)
-        visdom_helper.show_dict(text_name="eval_result_cluster", dic=result_cluster)
-        visdom_helper.show_dict(text_name="eval dataset statistics", dic=eval_examples_stat)
-
-
-        # 存储预测结果
-        dev_data_csv = read_csv(os.path.join(args.eval_data_dir, "dev.tsv"), sep="\t")
-        predict_result = dev_data_csv.loc[:, ["#1 ID", "#2 ID"]]
-        predict_result["# 0 likelihood"] = Series(likelihood[:, 0])
-        predict_result["# 1 likelihood"] = Series(likelihood[:, 1])
-        predict_result["# pred label"] = Series(preds)
-        output_pred_file = os.path.join(args.predict_output_dir, CONFIG.BERT_PREDICT_FILE_NAME)
-        if not os.path.exists(args.predict_output_dir):
-            os.makedirs(args.predict_output_dir)
-        predict_result.to_csv(output_pred_file, sep="\t", index=False)
-        output_pred_file_cluster = os.path.join(args.predict_output_dir, "BERT_predict_cluster.tsv")
-        cluster_frame.to_csv(output_pred_file_cluster, sep="\t", index=False)
-
-        predict_eval_file = os.path.join(args.predict_output_dir, "eval_results.txt")
-        with open(predict_eval_file, "w") as writer:
-            logger.info("***** Eval results *****")
-            for key in sorted(result.keys()):
-                logger.info("  %s = %s", key, str(result[key]))
-                writer.write("%s = %s\n" % (key, str(result[key])))
-            for key in sorted(result_cluster.keys()):
-                logger.info("  cluster %s = %s", key, str(result_cluster[key]))
-                writer.write("cluster %s = %s\n" % (key, str(result_cluster[key])))
-
-
-        # 实验记录
-        model_parameter_path = args.train_output_dir if args.do_train else args.load_model_dir
-        generate_record(
-            table_name="test_BERT",
-            coref_level=args.coref_level,
-            input_data_path=os.path.join(args.eval_data_dir, "dev.tsv"),
-            model_parameter_path= model_parameter_path,
-            output_evaluate_dir=args.predict_output_dir,
-            args_dict=vars(args),
-            eval_result_dict=result,
-            time_stamp=time_stamp
-        )
-
-        # hack for MNLI-MM
-        if task_name == "mnli":
-            task_name = "mnli-mm"
-            processor = processors[task_name]()
-
-            if os.path.exists(args.train_output_dir + '-MM') and os.listdir(args.train_output_dir + '-MM') and args.do_train:
-                raise ValueError("Output directory ({}) already exists and is not empty.".format(args.train_output_dir))
-            if not os.path.exists(args.train_output_dir + '-MM'):
-                os.makedirs(args.train_output_dir + '-MM')
-
-            eval_examples = processor.get_dev_examples(args.eval_data_dir)
-            eval_features = convert_examples_to_features(
-                eval_examples, label_list, args.max_seq_length, tokenizer, output_mode)
-            logger.info("***** Running evaluation *****")
-            logger.info("  Num examples = %d", len(eval_examples))
-            logger.info("  Batch size = %d", args.eval_batch_size)
-            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-            # Run prediction for full data
-            eval_sampler = SequentialSampler(eval_data)
-            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-            model.eval()
-            eval_loss = 0
-            nb_eval_steps = 0
-            preds = []
-
-            for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-                input_ids = input_ids.to(device)
-                input_mask = input_mask.to(device)
-                segment_ids = segment_ids.to(device)
-                label_ids = label_ids.to(device)
-
-                with torch.no_grad():
-                    logits = model(input_ids, segment_ids, input_mask, labels=None)
-
-                loss_fct = CrossEntropyLoss()
-                tmp_eval_loss = loss_fct(logits.view(-1, num_labels), label_ids.view(-1))
-
-                eval_loss += tmp_eval_loss.mean().item()
-                nb_eval_steps += 1
-                if len(preds) == 0:
-                    preds.append(logits.detach().cpu().numpy())
-                else:
-                    preds[0] = np.append(
-                        preds[0], logits.detach().cpu().numpy(), axis=0)
-
-            eval_loss = eval_loss / nb_eval_steps
-            preds = preds[0]
-            preds = np.argmax(preds, axis=1)
-            result = compute_metrics(task_name, preds, all_label_ids.numpy())
-            loss = tr_loss / nb_tr_steps if args.do_train else None
-
-            result['eval_loss'] = eval_loss
-            result['global_step'] = global_step
-            result['loss'] = loss
-
-            output_eval_file = os.path.join(args.train_output_dir + '-MM', "eval_results.txt")
-            with open(output_eval_file, "w") as writer:
-                logger.info("***** Eval results *****")
-                for key in sorted(result.keys()):
-                    logger.info("  %s = %s", key, str(result[key]))
-                    writer.write("%s = %s\n" % (key, str(result[key])))
 
 
 if __name__ == "__main__":

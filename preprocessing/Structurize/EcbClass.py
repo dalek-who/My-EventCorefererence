@@ -18,7 +18,7 @@ CSV_DIR = ECB_DRI + "ECBplus_coreference_sentences.csv"
 DATA_DIR = ECB_DRI + "ECB+/"
 CSV_ECBplus_coreference_sentences = read_csv(CONFIG.CSV_DIR)
 
-spacy_nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
+# spacy_nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", do_lower_case=True)
 
 class EcbPlusTopView(object):
