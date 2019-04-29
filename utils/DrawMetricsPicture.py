@@ -1,4 +1,5 @@
 import os
+from collections import deque
 from pandas import Series, DataFrame, Index
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,7 +24,7 @@ def result_visualize(curve_data_dict: dict, output_dir):
         os.makedirs(os.path.join(output_dir, "./visualize"))
     # train loss each step 曲线
     # 未平滑的
-    sr_train_loss_each_step = Series(result['train_loss_each_step'], name="Train Loss")
+    sr_train_loss_each_step = Series(curve_data_dict['train_loss_each_step'], name="Train Loss")
     sr_train_loss_each_step.index = Index([int(i) for i in sr_train_loss_each_step.index])
     plot_train_loss_each_step = sr_train_loss_each_step.plot(title="Train Loss each step", legend=True)
     plot_train_loss_each_step.set_xlabel("Step")
@@ -41,7 +42,7 @@ def result_visualize(curve_data_dict: dict, output_dir):
     plt.clf()
 
     # learning rate each step 曲线
-    sr_learning_rate_each_step = Series(result['learning_rate_each_step'], name="Learning Rate")
+    sr_learning_rate_each_step = Series(curve_data_dict['learning_rate_each_step'], name="Learning Rate")
     sr_learning_rate_each_step.index = Index([int(i) for i in sr_learning_rate_each_step.index])
     plot_learning_rate_each_step = sr_learning_rate_each_step.plot(title="Learning Rate", legend=True)
     plot_learning_rate_each_step.set_xlabel("Step")
@@ -51,8 +52,8 @@ def result_visualize(curve_data_dict: dict, output_dir):
 
     # 测评指标曲线
     df_metrics = {
-        "train": DataFrame(result["eval_result_each_epoch_on_train"]).T,
-        "dev": DataFrame(result["eval_result_each_epoch_on_dev"]).T,
+        "train": DataFrame(curve_data_dict["eval_result_each_epoch_on_train"]).T,
+        "dev": DataFrame(curve_data_dict["eval_result_each_epoch_on_dev"]).T,
     }
     df_metrics["train"].index = Index([int(i) for i in df_metrics["train"].index])
     df_metrics["dev"].index = Index([int(i) for i in df_metrics["dev"].index])
