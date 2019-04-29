@@ -665,10 +665,13 @@ def my_main():
                 eval_result=eval_result, epoch=epoch, global_step=global_train_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
             draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=epoch, train_result=train_result, eval_result=eval_result)
         # 保存训练曲线的所有数据点
+        best_eval_result =  train_curve_datas["eval_result_each_epoch_on_dev"][compare_dict["best_epoch"]]
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
             json.dump(train_curve_datas, f)
+        with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_BEST_EVAL_RESULT_FILE_NAME), "w") as f:
+            json.dump(best_eval_result, f, indent=4)
         # 展示最好结果
-        visdom_helper.show_dict(title_name="Best Eval Result", dic=train_curve_datas[compare_dict["best_epoch"]])
+        visdom_helper.show_dict(title_name="Best Eval Result", dic=best_eval_result)
         # load最好的模型
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=2, ModelClass=ModelClass)
 

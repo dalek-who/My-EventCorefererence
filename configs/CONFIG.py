@@ -8,6 +8,7 @@ topics_validation = [2, 5, 12, 18, 21, 23, 34, 35]
 BERT_PREDICT_FILE_NAME = "BERT_predict.tsv"
 EXPERIMENT_RECOED_DIR = os.path.abspath(os.path.join(__file__, "../../ExperimentRecord/"))
 TRAIN_CURVE_DATA_FILE_NAME = "train_curve_datas.json"
+TRAIN_BEST_EVAL_RESULT_FILE_NAME = "train_best_eval_result.json"
 
 # ECB+数据集路径
 ECB_DRI = os.path.abspath(os.path.join(__file__, "../../datasets/ECB+_LREC2014/"))
