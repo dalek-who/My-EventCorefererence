@@ -260,13 +260,13 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
         model.train()
     global train_global_step
     train_BERT_dataloader = BERT_dataloader
-    for step, batch in tqdm(enumerate(train_BERT_dataloader), desc="Train: "):
+    for step, batch in enumerate(tqdm(train_BERT_dataloader, desc="Train: ")):
         train_global_step += 1
         batch = tuple(t.to(device) for t in batch)
         BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
         logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b)
         loss_fct = CrossEntropyLoss()
-        loss = loss_fct(logits.view(-1, 2), label_ids.view(-1))
+        loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
         if n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu.
@@ -288,10 +288,12 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
         optimizer.zero_grad()
 
         # 记录数据点
-        loss_each_step[train_global_step] = loss
+        loss_each_step[train_global_step] = loss.detach().cpu().item()
         learning_rate_each_step[train_global_step] = lr_this_step
         # 绘图
-        draw_visdom_each_step(visdom_helper=visdom_helper, step=train_global_step, train_loss=loss, learning_rate=learning_rate)
+        draw_visdom_each_step(
+            visdom_helper=visdom_helper, step=train_global_step,
+            train_loss=loss.detach().cpu().item(), learning_rate=learning_rate)
 
 
 def do_predict(model, device, BERT_dataloader, feature_list: list):
@@ -302,7 +304,7 @@ def do_predict(model, device, BERT_dataloader, feature_list: list):
     eval_loss = 0
     nb_eval_steps = 0
     preds = []
-    for step, batch in tqdm(enumerate(eval_BERT_dataloader), desc="Predict: "):
+    for step, batch in enumerate(tqdm(eval_BERT_dataloader, desc="Predict: ")):
         batch = tuple(t.to(device) for t in batch)
         BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
         with torch.no_grad():
@@ -360,6 +362,8 @@ def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: 
                             epoch: int, global_step: int, by_what: str="CoNLL_f1"):
     if eval_result[by_what] > compare_dict["best_result"]:
         logger.info(f"********** best model with {by_what}={eval_result[by_what]}, update checkpoint **********")
+        for k, v in eval_result.items():
+            logger.info("%s = %s" % (k, v))
         compare_dict["best_result"] = eval_result[by_what]
         compare_dict["best_epoch"] = epoch
         compare_dict["best_global_step"] = global_step
@@ -369,7 +373,7 @@ def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: 
 def draw_visdom_each_epoch(visdom_helper: EasyVisdom, epoch: int, train_result: dict, eval_result: dict):
 
     # 每个指标一张图, 图里有train和dev两条线
-    for which_line in ("MUC_f1", "B-cuded_f1", "CEAFe_f1", "CEAFm_f1", "BLANCc_f1", "BLANCn_f1", "BLANC_f1",
+    for which_line in ("MUC_f1", "B-cubed_f1", "CEAFe_f1", "CEAFm_f1", "BLANCc_f1", "BLANCn_f1", "BLANC_f1",
                        "CoNLL_f1", "AVG_f1"):
         for name, result in [("Train", train_result), ("Eval", eval_result)]:
             visdom_helper.update_line(
@@ -383,7 +387,7 @@ def draw_visdom_each_epoch(visdom_helper: EasyVisdom, epoch: int, train_result: 
             title_name="Loss of each Epoch", x=epoch, y=result["eval_loss"])
 
     # dev，train各一张图，每张图里每个单项指标一条线
-    for which_line in ("MUC_f1", "B-cuded_f1", "CEAFe_f1", "BLANC_f1"):
+    for which_line in ("MUC_f1", "B-cubed_f1", "CEAFe_f1", "BLANC_f1"):
         for name, result in [("Train", train_result), ("Eval", eval_result)]:
             visdom_helper.update_line(x_axis_name="Epoch", y_axis_name="Evaluation Result", line_name="%s_%s" % (name, which_line),
                                       title_name="%s Single Metrics of each Epoch" % name, x=epoch, y=result[which_line])
@@ -629,7 +633,8 @@ def my_main():
         train_BERT_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
         visdom_helper.show_dict(title_name="Train Data Statistics", dic=input_feature_statistics(train_features))
 
-        global global_train_step
+
+        global train_global_step
         compare_dict = {"best_result": -1, "best_epoch": -1, "best_global_step": -1}
         train_curve_datas = {
             "train_loss_each_step": dict(),
@@ -662,7 +667,7 @@ def my_main():
             train_curve_datas["eval_result_each_epoch_on_dev"][epoch] = eval_result
             compare_with_checkpoint(
                 model=model, output_checkpoint_dir=args.train_output_dir, logger=logger, compare_dict=compare_dict,
-                eval_result=eval_result, epoch=epoch, global_step=global_train_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
+                eval_result=eval_result, epoch=epoch, global_step=train_global_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
             draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=epoch, train_result=train_result, eval_result=eval_result)
         # 保存训练曲线的所有数据点
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
