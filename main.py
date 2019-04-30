@@ -563,8 +563,7 @@ def my_main():
                 eval_result=eval_result, epoch=epoch, global_step=train_global_step, by_what=CONFIG.CHECKPOINT_BY_WHAT)
             draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=epoch, train_result=train_result, eval_result=eval_result)
         # 保存训练曲线的所有数据点,包括每个step的loss和学习率，每个epoch的测评
-        result_visualize(curve_data_dict=train_curve_datas, output_dir=args.train_output_dir)  # 存储为图片
-        best_eval_result =  train_curve_datas["eval_result_each_epoch_on_dev"][compare_dict["best_epoch"]]
+        best_eval_result = train_curve_datas["eval_result_each_epoch_on_dev"][compare_dict["best_epoch"]]
         with open(os.path.join(args.train_output_dir, CONFIG.TRAIN_CURVE_DATA_FILE_NAME), "w") as f:
             json.dump(train_curve_datas, f)  # 学习率list点太多，不自动缩进了
         # 保存最好结果
@@ -576,6 +575,8 @@ def my_main():
         # 保存命令行参数选项
         with open(os.path.join(args.train_output_dir, CONFIG.COMMAND_LINE_ARGUMENTS_FILE_NAME), "w") as f:
             json.dump(vars(args), f, indent=4)
+        # 生成曲线图
+        result_visualize(curve_data_dict=train_curve_datas, output_dir=args.train_output_dir)
         # 展示最好结果
         visdom_helper.show_dict(title_name="Best Eval Result", dic=best_eval_result)
         # load最好的模型

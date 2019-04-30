@@ -7,21 +7,21 @@ log_name = "log_run.txt"
 
 args_value = {
     # 会调整的
-    "--description": "DAST_within-document_batch-120_epoch-3_sentence_and_trigger_classifier_no_hidden_layer_half_window_0",
-    "--coref_level": "within_document",  # "cross_document", "within_document", "cross_topic"
+    "--description": "DAST_cross-document_batch-123_epoch-3_sentence-and-trigger_no-hidden-layer_half-window-3_increase-positive-3",
+    "--coref_level": "cross_document",  # "cross_document", "within_document", "cross_topic"
     "--learning_rate": 5e-5,
     "--max_seq_length": 123,
-    "--batch_size": 120,
-    "--num_train_epochs": 4.0,
-    "--increase_positive": 2,
-    "--trigger_half_window": 0,
+    "--batch_size": 180,
+    "--num_train_epochs": 3.0,
+    "--increase_positive": 3,
+    "--trigger_half_window": 3,
 
     # 各种目录
     "--load_model_dir": "",
     "--train_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_model/SentenceTrigger_half-window-3_no-hidden-layer_half-window-0",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_model/SentenceTrigger_half-window-3_no-hidden-layer_cross-document_increase-positive-3",
     "--predict_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_predict/SentenceTrigger_half-window-3_no-hidden-layer_half-window-0",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_predict/SentenceTrigger_half-window-3_no-hidden-layer_cross-document_increase-positive-3",
 
     # 基本不变的
     "--bert_model": "bert-base-uncased",
