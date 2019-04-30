@@ -29,16 +29,16 @@ def result_visualize(curve_data_dict: dict, output_dir):
     plot_train_loss_each_step = sr_train_loss_each_step.plot(title="Train Loss each step", legend=True)
     plot_train_loss_each_step.set_xlabel("Step")
     plot_train_loss_each_step.set_ylabel("Loss")
-    plt.savefig(os.path.join(output_dir + "./visualize/train_loss_each_step.png"))
+    plt.savefig(os.path.join(output_dir, "./visualize/train_loss_each_step.PNG"))
     plt.clf()
     # 平滑的
     # 50 step平滑
     plot_train_loss_each_50_step = smooth_loss(sr_train_loss_each_step, smooth_size=50)
-    plt.savefig(os.path.join(output_dir + "./visualize/train_loss_each_step_each_50_step.png"))
+    plt.savefig(os.path.join(output_dir, "./visualize/train_loss_each_step_each_50_step.png"))
     plt.clf()
     # 100 step平滑
     plot_train_loss_each_100_step = smooth_loss(sr_train_loss_each_step, smooth_size=100)
-    plt.savefig(os.path.join(output_dir + "./visualize/train_loss_each_step_each_100_step.png"))
+    plt.savefig(os.path.join(output_dir, "./visualize/train_loss_each_step_each_100_step.png"))
     plt.clf()
 
     # learning rate each step 曲线
@@ -47,7 +47,7 @@ def result_visualize(curve_data_dict: dict, output_dir):
     plot_learning_rate_each_step = sr_learning_rate_each_step.plot(title="Learning Rate", legend=True)
     plot_learning_rate_each_step.set_xlabel("Step")
     plot_learning_rate_each_step.set_ylabel("Learning Rate")
-    plt.savefig(os.path.join(output_dir + "./visualize/learning_rate_each_step.png"))
+    plt.savefig(os.path.join(output_dir, "./visualize/learning_rate_each_step.png"))
     plt.clf()
 
     # 测评指标曲线
@@ -66,7 +66,7 @@ def result_visualize(curve_data_dict: dict, output_dir):
         metrics_plot = df.plot(title="%s of each epoch" % which_line)
         metrics_plot.set_xlabel("Epoch")
         metrics_plot.set_ylabel("Evaluation Result")
-        plt.savefig(os.path.join(output_dir + "./visualize/train_and_dev_each_epoch_%s.png" % which_line))
+        plt.savefig(os.path.join(output_dir, "./visualize/train_and_dev_each_epoch_%s.png" % which_line))
         plt.clf()
 
     # 一张loss图，里面有train和dev两条线
@@ -76,17 +76,17 @@ def result_visualize(curve_data_dict: dict, output_dir):
     metrics_plot = df.plot(title="Loss of each epoch")
     metrics_plot.set_xlabel("Epoch")
     metrics_plot.set_ylabel("Loss")
-    plt.savefig(os.path.join(output_dir + "./visualize/train_and_dev_each_epoch_Loss.png"))
+    plt.savefig(os.path.join(output_dir, "./visualize/train_and_dev_each_epoch_Loss.png"))
     plt.clf()
 
     # 四张图，分别是train/dev的单项指标/复合指标
     for which_set in ("train", "dev"):
         for group_name, metrics_group in {"Single Metric": ["MUC_f1", "B-cubed_f1", "CEAFe_f1", "BLANC_f1"],
                                           "Compisite Metrics": ["CoNLL_f1", "AVG_f1"]}.items():
-            metrics_plot = df_metrics[which_set].plot(title=group_name)
+            metrics_plot = df_metrics[which_set][metrics_group].plot(title=group_name)
             metrics_plot.set_xlabel("Epoch")
             metrics_plot.set_ylabel("Evaluation Result")
-            plt.savefig(os.path.join(output_dir + "./visualize/%s_%s_each_epoch.png" % (group_name, which_set)))
+            plt.savefig(os.path.join(output_dir, "./visualize/%s_%s_each_epoch.png" % (group_name, which_set)))
             plt.clf()
 
     # 论文中的评价指标表格
@@ -102,4 +102,4 @@ def result_visualize(curve_data_dict: dict, output_dir):
     ]
     dev_metrics_in_table = df_metrics["dev"].loc[df_metrics["dev"][metrics_use] == max(df_metrics["dev"][metrics_use]),
                                                  column_in_table].head(1)
-    dev_metrics_in_table.to_csv(os.path.join(output_dir + "./visualize/best_result.tsv"), index=False)
+    dev_metrics_in_table.to_csv(os.path.join(output_dir, "./visualize/best_result.tsv"), index=False)
