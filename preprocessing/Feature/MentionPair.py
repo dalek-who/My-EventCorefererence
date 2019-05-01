@@ -13,6 +13,7 @@ from torch_geometric.data import Data as GnnData
 from math import log
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import pickle
 
 from preprocessing.Structurize.EcbClass import *
 
@@ -152,6 +153,17 @@ class InputFeaturesCreator(object):
     def __init__(self, ECBPlus: EcbPlusTopView):
         self.ecb = ECBPlus
 
+    # def load(self,
+    #          cross_document: bool=True,
+    #          cross_topic: bool=False):
+    #     cross_document_str = "_cross_doc" if cross_document else "_within_doc"
+    #     cross_topic_str = "_cross_topic" if cross_topic else ""
+    #     file_name = "./feature_%s%s.pkl" % (cross_document_str, cross_topic_str)
+    #     path = os.path.join(os.path.dirname(__file__), file_name)
+    #     with open(path, "rb") as f:
+    #         features = pickle.load(f)
+    #     return features
+
     def create_from_dataset(
             self,
             topics: list or str="all",
@@ -184,6 +196,13 @@ class InputFeaturesCreator(object):
                 gnn_data = gnn_data
             )
             features.append(feature)
+
+        cross_document_str = "_cross_doc" if cross_document else "_within_doc"
+        cross_topic_str = "_cross_topic" if cross_topic else ""
+        file_name = "./feature_%s%s.pkl" % (cross_document_str, cross_topic_str)
+        path = os.path.join(os.path.dirname(__file__), file_name)
+        with open(path, "wb") as f:
+            pickle.dump(features, f)
         return features
 
 
