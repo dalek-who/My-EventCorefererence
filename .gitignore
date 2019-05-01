@@ -15,3 +15,7 @@ gen
 /test/preprocessing/feature/
 /middle_data/BERT_SentenceMatching/
 /start_jupyter.sh
+/.pytorch_pretrained_bert/
+/tmpx/
+/tmp/
+/tmp_lr_5e-6/

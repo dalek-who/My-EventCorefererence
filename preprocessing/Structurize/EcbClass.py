@@ -9,6 +9,10 @@ from typing import List, Dict
 from itertools import chain
 import spacy
 from pytorch_pretrained_bert.tokenization import BertTokenizer
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
+import pickle
 
 from preprocessing.Structurize.utils import *
 from configs import CONFIG
@@ -17,21 +21,63 @@ ECB_DRI = "../../datasets/ECB+_LREC2014/"
 CSV_DIR = ECB_DRI + "ECBplus_coreference_sentences.csv"
 DATA_DIR = ECB_DRI + "ECB+/"
 CSV_ECBplus_coreference_sentences = read_csv(CONFIG.CSV_DIR)
-
-# spacy_nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
+#%%
+spacy.prefer_gpu()  # gpu加速spacy
+nlp = spacy.load("en")  # 用spacy进行预处理，把token还原为lemma
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", do_lower_case=True)
+#%%
 
 class EcbPlusTopView(object):
     """ ECB+数据集最顶层的视角"""
     def __init__(self):
         self.document_view = EcbDocumentView()
         self.coreference_view = EcbCoreferenceView(DodumentView=self.document_view)
+        self.calculte_tfidf()
 
-    def BERT_MRPC_Data(self, topics: list or str="all", cross_document: bool=True):
-        dataset = []
-        topic_list = self.coreference_view.instance_dict_by_topic.keys() if topics=="all" else topics
-        # todo
+    def calculte_tfidf(self):
+        print("Calculate tfidf")
+        # doc列表
+        docs_list = []
+        for topic in self.document_view.topics_dict.values():
+            for doc in topic.documents_dict.values():
+                docs_list.append(doc)
+        # 词形还原，去除停用词
+        corpus = []
+        for doc in docs_list:
+            sentences_list = []
+            for sentence in doc.all_sentences_dict.values():
+                sentences_list.append(sentence.text())
+            doc_text = " ".join(sentences_list)
+            doc_spacy = doc = nlp(doc_text)
+            lemma_list = []
+            for token in doc_spacy:
+                lemma = token.lemma_
+                if not token.is_stop:
+                    lemma_list.append(lemma)
+            corpus.append(" ".join(lemma_list))
+        # TF-IDF
+        tfidfvec = TfidfVectorizer()
+        cop_tfidf = tfidfvec.fit_transform(corpus)
+        tfidf_weight = cop_tfidf.toarray()
+        # PCA降维
+        pca = PCA(n_components=CONFIG.TFIDF_PCA_DIM)
+        tfidf_weight_compressed = pca.fit_transform(tfidf_weight)
+        for index, doc in enumerate(docs_list):
+            doc: EcbDocument = doc
+            doc.tfidf = tfidf_weight_compressed[index, :]
+        self.tfidf_weight_compressed = tfidf_weight_compressed
 
+    def dump(self):
+        path = os.path.join(os.path.dirname(__file__), "./ECBplus.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls):
+        path = os.path.join(os.path.dirname(__file__), "./ECBplus.pkl")
+        with open(path, "rb") as f:
+            ECBplus = pickle.load(f)
+        return ECBplus
 
 class EcbDocumentView(object):
     def __init__(self):
@@ -97,6 +143,7 @@ class EcbDocument(object):
         self.tokens_dict: dict = self.parse_tokens_dict()
         self.components_dict: dict = self.parse_components_dict()
         self.instances_dict: dict = self.parse_instances_dict()
+        self.tfidf: np.array = None
 
         # generate properties
         # read xml files
@@ -203,7 +250,7 @@ class EcbDocument(object):
         self.doc_id = root.get("doc_id")
         # get tokens
         tokens = root.findall("token")
-        tokens = {int(token.get("t_id")): EcbToken(word=token.text,
+        tokens = {int(token.get("t_id")): EcbToken(word=token.text.rstrip("\t").replace("�","").replace("ô","o"),
                                                    sentence_id=int(token.get("sentence")),
                                                    tid=int(token.get("t_id")),
                                                    number=int(token.get("number")),
@@ -277,6 +324,15 @@ class EcbSentence(object):
 
     def text(self):
         return " ".join([token.word for token in self.tokens_list])
+
+    def text_with_annotation(self):
+        words = []
+        for token in self.tokens_list:
+            if token.component is None:
+                words.append(token.word)
+            else:
+                words.append("[%s]" % token.word)
+        return " ".join(words)
 
 
 class EcbToken(object):

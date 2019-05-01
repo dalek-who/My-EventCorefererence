@@ -32,6 +32,9 @@ assert example_mention_pair is not None
 #%%
 m1 = example_mention_pair.mention_pair[0]
 m2 = example_mention_pair.mention_pair[1]
+print(m1.sentence.text_with_annotation())
+print(m2.sentence.text_with_annotation())
+
 
 #%%
 from collections import defaultdict
@@ -53,7 +56,7 @@ def trigger_argument_distance(trigger: EcbComponent, argument: EcbComponent):
 
 
 def normalize_edge_weight(distance: int):
-    return log(1 + 15/(0.5 + distance))  # log normalize, 距离越远越不重要，0.1防止分母为0
+    return log(1 + 1/(0.1 + distance))  # log normalize, 距离越远越不重要，0.1防止分母为0
 
 #%%
 
@@ -142,7 +145,7 @@ plt.show()
 # Argument-Trigger图
 limits=plt.axis('off')  # 不显示坐标
 layout = nx.spring_layout(G)  # 生成图的布局
-nx.draw_networkx_nodes(G,layout, nodelist=[m1,m2], node_color="b")  # 绘制两个trigger的点，画成蓝色蓝色
+nx.draw_networkx_nodes(G,layout, nodelist=[m1,m2], node_color="b", node_size=900)  # 绘制两个trigger的点，画成蓝色蓝色
 argument_nodes = [node for node in G.nodes if isinstance(node, EcbInstance)]  # 画出其他argument点，画成红色
 nx.draw_networkx_nodes(G, layout, nodelist=argument_nodes, node_color="r")
 nx.draw_networkx_labels(G, layout, labels=labels)  # 绘制点的标签

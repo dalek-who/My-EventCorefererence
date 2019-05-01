@@ -16,10 +16,10 @@ vertex_embedding = [
     [91, 92, 93, 94, 95],
 ]
 
-mask = [0,0,1,0,1,0,0,1,1,0]
+mask = [[1],[0],[1],[0],[1],[1],[0],[1],[1],[0]]
 
 ts_embedding = Tensor(vertex_embedding)
-ts_mask = Tensor(mask).unsqueeze(-1).type(torch.uint8)  # mask必须为unit8型。
+ts_mask = Tensor(mask).type(torch.uint8)  # mask必须为unit8型。
 
 #%%
 selected = ts_embedding.masked_select(ts_mask)

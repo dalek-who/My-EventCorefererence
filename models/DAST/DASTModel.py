@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
+
 
 from pytorch_pretrained_bert.modeling import BertModel, BertPreTrainedModel
 
@@ -58,7 +61,9 @@ class DAST_SentenceTrigger(BertPreTrainedModel):
         self.classifier = nn.Linear(config.hidden_size * 3, num_labels)
         self.apply(self.init_bert_weights)
 
-    def forward(self, input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b):
+    def forward(self, input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b,
+                tfidf,
+                x, edge_index, edge_weight, trigger_mask):
         # bert
         tokens_embedding, sentence_embedding = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
         # 两个trigger的向量表示
@@ -70,5 +75,34 @@ class DAST_SentenceTrigger(BertPreTrainedModel):
         event_represent = torch.cat((sentence_embedding, trigger_embedding_a, trigger_embedding_b), dim=1)
         event_represent = self.dropout(event_represent)
         logits = self.classifier(event_represent)
+
+        return logits
+
+
+class DAST_Argument(BertPreTrainedModel):
+    def __init__(self, config, num_labels):
+        super(DAST_Argument, self).__init__(config)
+        self.num_labels = num_labels
+        self.feature_size = 40
+        self.conv1_size = 16
+        self.dropout1 = nn.Dropout(config.hidden_dropout_prob)
+        self.conv1 = GCNConv(self.feature_size, self.conv1_size)
+        self.classifier = nn.Linear(self.conv1_size*2, num_labels)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b,
+                tfidf,
+                x, edge_index, edge_weight, trigger_mask):
+
+        nodes_embedding1 = self.conv1(x, edge_index, edge_weight)
+        nodes_embedding1 = F.relu(nodes_embedding1)
+        nodes_embedding1 = self.dropout1(nodes_embedding1)
+
+        nodes_embedding = nodes_embedding1
+        trigger_mask = trigger_mask.type(torch.uint8)
+        trigger_nodes_embedding = nodes_embedding.masked_select(trigger_mask)
+        trigger_nodes_embedding = trigger_nodes_embedding.view(-1, 2 * self.conv1_size)  # 2:一个样本里有两个trigger
+
+        logits = self.classifier(trigger_nodes_embedding)
 
         return logits

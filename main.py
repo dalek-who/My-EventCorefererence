@@ -40,12 +40,16 @@ from torch.nn import CrossEntropyLoss, MSELoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score, precision_score, recall_score
 from pandas import DataFrame, Series, read_csv
+from math import ceil
 
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from pytorch_pretrained_bert.modeling import BertForSequenceClassification, BertConfig, WEIGHTS_NAME, CONFIG_NAME
 from pytorch_pretrained_bert.tokenization import BertTokenizer
-from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear  # 新版本没有warmup_linear
-# from pytorch_pretrained_bert.optimization import BertAdam
+try:
+    from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear  # 新版本没有warmup_linear
+except ImportError:
+    from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
+from torch_geometric.data import DataLoader as GnnDataLoader
 
 from configs import CONFIG
 from utils.ExperimentRecordManager import generate_record, get_time_stamp, VisdomHelper
@@ -56,7 +60,7 @@ from utils.DrawMetricsPicture import result_visualize
 # 新加的
 from preprocessing.Structurize.EcbClass import EcbPlusTopView
 from preprocessing.Feature.MentionPair import InputFeaturesCreator
-from models.DAST.DASTModel import DAST_SentenceTrigger
+from models.DAST.DASTModel import *
 from utils.VisdomHelper import EasyVisdom
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -134,26 +138,38 @@ def create_model_input_loader(feature_list: list, batch_size):
     all_BERT_segment_ids = torch.tensor([f.BERT_segment_ids for f in feature_list], dtype=torch.long)
     all_BERT_trigger_mask_a = torch.tensor([f.BERT_trigger_mask_a for f in feature_list], dtype=torch.long)
     all_BERT_trigger_mask_b = torch.tensor([f.BERT_trigger_mask_b for f in feature_list], dtype=torch.long)
+    all_tfidf = torch.tensor([f.tfidf for f in feature_list], dtype=torch.float)
     all_label = torch.tensor([f.label for f in feature_list], dtype=torch.long)
     BERT_data = TensorDataset(
         all_BERT_input_ids, all_BERT_input_mask, all_BERT_segment_ids,
-        all_BERT_trigger_mask_a, all_BERT_trigger_mask_b, all_label)
+        all_BERT_trigger_mask_a, all_BERT_trigger_mask_b, all_tfidf, all_label)
     BERT_dataloader = DataLoader(BERT_data, batch_size=batch_size, shuffle=False)  # 之前已经手动shuffle
-    return BERT_dataloader
+
+    all_gnn_datas = [f.gnn_data for f in feature_list]
+    GNN_dataloader =GnnDataLoader(all_gnn_datas, batch_size=batch_size, shuffle=False)
+    return BERT_dataloader, GNN_dataloader
 
 
-def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gpu: int, fp16: bool,
+def do_train(model, optimizer, warmup_linear, device, BERT_dataloader, GNN_dataloader, feature_list: list, n_gpu: int, fp16: bool,
              visdom_helper: EasyVisdom, num_train_optimization_steps: int, warmup_proportion: float,
              learning_rate: float, loss_each_step: dict, learning_rate_each_step: dict):
     if model is not None:
         model.train()
     global train_global_step
-    train_BERT_dataloader = BERT_dataloader
-    for step, batch in enumerate(tqdm(train_BERT_dataloader, desc="Train: ")):
+
+    for step, batches in enumerate(tqdm(zip(BERT_dataloader, GNN_dataloader), desc="Train: ", total=len(BERT_dataloader))):
         train_global_step += 1
-        batch = tuple(t.to(device) for t in batch)
-        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
-        logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b)
+        # pytorch的dataloader和gnn的dataloader机制不同
+        BERT_batch = tuple(t.to(device) for t in batches[0])
+        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, tfidf, labels = BERT_batch
+        GNN_batch = batches[1]
+        GNN_batch.to(device, *('x', 'edge_index', 'edge_weight', 'trigger_mask', 'y'))
+        GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask, GNN_labels = \
+            GNN_batch.x, GNN_batch.edge_index, GNN_batch.edge_weight, GNN_batch.trigger_mask, GNN_batch.y
+        logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
+                       tfidf,
+                       GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask)
+
         loss_fct = CrossEntropyLoss()
         loss = loss_fct(logits.view(-1, 2), labels.view(-1))
 
@@ -166,7 +182,12 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
             loss.backward()
 
         # 学习率曲线
-        lr_this_step = learning_rate * warmup_linear(train_global_step / num_train_optimization_steps, warmup_proportion)
+        try:
+            lr_this_step = learning_rate * warmup_linear(train_global_step / num_train_optimization_steps, warmup_proportion)
+        except:
+            lr_this_step = learning_rate * warmup_linear.get_lr(train_global_step, warmup_proportion)
+            # lr_this_step = learning_rate * warmup_linear.get_lr(train_global_step / num_train_optimization_steps, warmup_proportion)
+
         # 更新
         if fp16:
             # modify learning rate with special warm up BERT uses
@@ -185,19 +206,25 @@ def do_train(model, optimizer, device, BERT_dataloader, feature_list: list, n_gp
             train_loss=loss_each_step[train_global_step], learning_rate=learning_rate_each_step[train_global_step])
 
 
-def do_predict(model, device, BERT_dataloader, feature_list: list):
+def do_eval(model, device, BERT_dataloader, GNN_dataloader, feature_list: list):
     if model is not None:
         model.eval()
-    eval_BERT_dataloader = BERT_dataloader
 
     eval_loss = 0
     nb_eval_steps = 0
     preds = []
-    for step, batch in enumerate(tqdm(eval_BERT_dataloader, desc="Predict: ")):
-        batch = tuple(t.to(device) for t in batch)
-        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, labels = batch
+    for step, batches in enumerate(tqdm(zip(BERT_dataloader, GNN_dataloader), desc="Eval: ", total=len(BERT_dataloader))):
+        # pytorch的dataloader和gnn的dataloader机制不同
+        BERT_batch = tuple(t.to(device) for t in batches[0])
+        BERT_input_ids, BERT_input_mask, BERT_segment_ids, BERT_trigger_mask_a, BERT_trigger_mask_b, tfidf, labels = BERT_batch
+        GNN_batch = batches[1]
+        GNN_batch.to(device, *('x', 'edge_index', 'edge_weight', 'trigger_mask', 'y'))
+        GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask, GNN_labels = \
+            GNN_batch.x, GNN_batch.edge_index, GNN_batch.edge_weight, GNN_batch.trigger_mask, GNN_batch.y
         with torch.no_grad():
-            logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b)
+            logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
+                           tfidf,
+                           GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask)
 
         # create eval loss and other metric required by the task
         loss_fct = CrossEntropyLoss()
@@ -244,7 +271,13 @@ def prepare_optimizer(model, fp16: bool, loss_scale: float, learning_rate: float
     else:
         optimizer = BertAdam(optimizer_grouped_parameters, lr=learning_rate, warmup=warmup_proportion,
                              t_total=num_train_optimization_steps)
-    return optimizer
+    try:
+        global warmup_linear
+        warmup_linear = warmup_linear
+    except NameError:
+        warmup_linear = WarmupLinearSchedule(warmup=warmup_proportion, t_total=num_train_optimization_steps)
+
+    return optimizer, warmup_linear
 
 
 def compare_with_checkpoint(model, output_checkpoint_dir, logger, compare_dict: dict, eval_result: dict,
@@ -468,7 +501,12 @@ def my_main():
 
     # 准备数据
     dataset_statistics_dict = dict()  # 统计数据集
-    feature_creator = InputFeaturesCreator(ECBPlus=EcbPlusTopView())
+    try:
+        ECBplus = EcbPlusTopView.load()  # 预先存储好，load比较快
+    except :
+        ECBplus = EcbPlusTopView()
+        ECBplus.dump()
+    feature_creator = InputFeaturesCreator(ECBPlus=ECBplus)
     logger.info("*******  Create eval features  ******")
     dev_features = feature_creator.create_from_dataset(
         topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
@@ -484,15 +522,18 @@ def my_main():
             max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
         dataset_statistics_dict["train"] = input_feature_statistics(train_features)
         dataset_statistics_dict["train"]["positive_increase"] = args.increase_positive
-        num_train_optimization_steps = int(len(train_features) / args.batch_size) * args.num_train_epochs
+        # num_train_optimization_steps = int(len(train_features) / args.batch_size) * args.num_train_epochs
         if args.increase_positive >= 1:  # 扩增正例
             train_features = dataset_increase(examples=train_features, more=args.increase_positive, label=1)
         train_features = dataset_shuffle(train_features)
+        num_train_optimization_steps = ceil(len(train_features) / args.batch_size) * args.num_train_epochs
 
     # 准备模型
     cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_-1')
     if args.use_sentence_trigger_feature and not args.use_document_feature and not args.use_argument_feature:
         ModelClass = DAST_SentenceTrigger
+    elif not args.use_sentence_trigger_feature and not args.use_document_feature and args.use_argument_feature:
+        ModelClass = DAST_Argument
     else:
         ModelClass = None
 
@@ -502,7 +543,7 @@ def my_main():
         model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
     else:
         model = None
-        raise ModuleNotFoundError("Please choose a model")
+        # raise ModuleNotFoundError("Please choose a model")  # todo
 
     if args.fp16:
         model.half()
@@ -514,16 +555,16 @@ def my_main():
     time_stamp = get_time_stamp()
     visdom_helper = EasyVisdom(env_name=f"DAST env: %s %s " % (time_stamp, args.description), enable=args.draw_visdom)
 
-    dev_BERT_dataloader = create_model_input_loader(feature_list=dev_features, batch_size=args.batch_size)
+    dev_BERT_dataloader, dev_GNN_dataloader = create_model_input_loader(feature_list=dev_features, batch_size=args.batch_size)
     visdom_helper.show_dict(title_name="Command Line Arguments", dic=vars(args))
     visdom_helper.show_dict(title_name="Eval Data Statistics", dic=input_feature_statistics(dev_features))
     if args.do_train:
         # 准备优化器
-        optimizer = prepare_optimizer(
+        optimizer, warmup_linear = prepare_optimizer(
             model, fp16=args.fp16, loss_scale=args.loss_scale, learning_rate=args.learning_rate,
             warmup_proportion=args.warmup_proportion, num_train_optimization_steps=num_train_optimization_steps)
         # train数据
-        train_BERT_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
+        train_BERT_dataloader, train_GNN_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
         visdom_helper.show_dict(title_name="Train Data Statistics", dic=input_feature_statistics(train_features))
 
 
@@ -537,25 +578,26 @@ def my_main():
         }
 
         # 训练开始前先eval一次
-        train_result, train_pred = do_predict(
-            model=model, device=device, BERT_dataloader=train_BERT_dataloader, feature_list=train_features)
-        eval_result, eval_pred = do_predict(
-            model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+        train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=train_BERT_dataloader,
+                                           GNN_dataloader=train_GNN_dataloader, feature_list=train_features)
+        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
+                                         GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
         train_curve_datas["eval_result_each_epoch_on_train"][0] = train_result
         train_curve_datas["eval_result_each_epoch_on_dev"][0] = eval_result
         draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=0, train_result=train_result, eval_result=eval_result)
         # 训练
         for epoch in trange(1, int(args.num_train_epochs)+1, desc="Epoch"):
             do_train(
-                model=model, optimizer=optimizer, device=device, BERT_dataloader=train_BERT_dataloader,
+                model=model, optimizer=optimizer, warmup_linear=warmup_linear, device=device,
+                BERT_dataloader=train_BERT_dataloader, GNN_dataloader=train_GNN_dataloader,
                 feature_list=train_features, n_gpu=n_gpu, fp16=args.fp16, visdom_helper=visdom_helper,
                 num_train_optimization_steps=num_train_optimization_steps, warmup_proportion=args.warmup_proportion,
                 learning_rate=args.learning_rate, loss_each_step=train_curve_datas["train_loss_each_step"],
                 learning_rate_each_step=train_curve_datas["learning_rate_each_step"])
-            train_result, train_pred = do_predict(
-                model=model, device=device, BERT_dataloader=train_BERT_dataloader, feature_list=train_features)
-            eval_result, eval_pred = do_predict(
-                model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+            train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=train_BERT_dataloader,
+                                               GNN_dataloader=train_GNN_dataloader, feature_list=train_features)
+            eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
+                                             GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
             train_curve_datas["eval_result_each_epoch_on_train"][epoch] = train_result
             train_curve_datas["eval_result_each_epoch_on_dev"][epoch] = eval_result
             compare_with_checkpoint(
@@ -583,7 +625,8 @@ def my_main():
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=2, ModelClass=ModelClass)
 
     if args.do_predict_only:
-        eval_result, eval_pred = do_predict(model=model, device=device, BERT_dataloader=dev_BERT_dataloader, feature_list=dev_features)
+        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
+                                         GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
         visdom_helper.show_dict(title_name="Eval Result", dic=eval_result)
 
 

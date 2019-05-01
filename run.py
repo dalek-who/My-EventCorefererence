@@ -25,9 +25,9 @@ args_value = {
 
     # 基本不变的
     "--bert_model": "bert-base-uncased",
+    "--cache_dir": "/users/wangyuanzheng/.pytorch_pretrained_bert",
 
     # 使用默认值
-    "--cache_dir": "",
     "--warmup_proportion": 0.1,
     "--seed": 42,
     "--loss_scale": 0,

@@ -8,6 +8,11 @@ from pandas import DataFrame, Series, read_csv
 import csv
 import networkx as nx
 from pytorch_pretrained_bert.tokenization import BertTokenizer
+import torch
+from torch_geometric.data import Data as GnnData
+from math import log
+import matplotlib.pyplot as plt
+from collections import defaultdict
 
 from preprocessing.Structurize.EcbClass import *
 
@@ -115,6 +120,7 @@ class InputFeatures(object):
             self,
             id_a,
             id_b,
+            label,
             input_ids,
             input_mask,
             segment_ids,
@@ -122,7 +128,7 @@ class InputFeatures(object):
             trigger_mask_b,
             tf_idf_a,
             tf_idf_b,
-            label
+            gnn_data
     ):
         self.id_a = id_a
         self.id_b = id_b
@@ -136,9 +142,10 @@ class InputFeatures(object):
         self.BERT_trigger_mask_b = trigger_mask_b
 
         # TF-IDF
-        self.TF_IDF = [tf_idf_a, tf_idf_b]
+        self.tfidf = np.concatenate((tf_idf_a, tf_idf_b), axis=0)
+
         # 图网络特征
-        # todo
+        self.gnn_data = gnn_data
 
 
 class InputFeaturesCreator(object):
@@ -162,6 +169,7 @@ class InputFeaturesCreator(object):
             pair: MentionPair = pair
             input_ids, input_mask, segment_ids, trigger_mask_a, trigger_mask_b = \
                 convert_mention_pair_to_BERT_features(mention_pair=pair, max_seq_length=max_seq_length, trigger_half_window=trigger_half_window)
+            gnn_data = convert_mention_pair_to_GNN_features(mention_pair=pair, cross_document=cross_document)
             feature = InputFeatures(
                 id_a=pair.mention_pair[0].global_mid(),
                 id_b=pair.mention_pair[1].global_mid(),
@@ -171,8 +179,9 @@ class InputFeaturesCreator(object):
                 segment_ids=segment_ids,
                 trigger_mask_a=trigger_mask_a,
                 trigger_mask_b=trigger_mask_b,
-                tf_idf_a=[0,1], # todo
-                tf_idf_b=[1,0]
+                tf_idf_a=pair.mention_pair[0].sentence.document.tfidf,
+                tf_idf_b=pair.mention_pair[1].sentence.document.tfidf,
+                gnn_data = gnn_data
             )
             features.append(feature)
         return features
@@ -296,232 +305,124 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
         else:
             tokens_b.pop()
 
-# class MentionPairCreator(object):
-#     def __init__(self, ECBPLUS: EcbPlusTopView):
-#         self.ECBPLUS: EcbPlusTopView = ECBPLUS
-#
-#     def generate_mention_pairs(
-#             self,
-#             topics: list or str="all",
-#             cross_document: bool=True,
-#             cross_topic: bool=True,
-#             prefix_list: list=None,
-#             ignore_order: bool=True,
-#             positive_increase: int=0,
-#             shuffle: bool=True,
-#             by_what: str="mention"):
-#         topics_list = list(self.ECBPLUS.document_view.topics_dict.keys()) if topics == "all" else topics[:]
-#         mention_pair_dict = dict()
-#
-#         # 用来添加mention-pair 的函数
-#         def add_mention_pair(m1, m2, mention_pair_dict, ignore_order: bool = True, by_what: str="mention"):
-#             if by_what=="sentence" and m1.sentence.text() == m2.sentence.text():
-#                 return
-#             mention_pair = MentionPair(mention1=m1, mention2=m2, ignore_order=ignore_order)
-#             if mention_pair.pair_id(by_what=by_what) in mention_pair_dict.keys():
-#                 exist_pair = mention_pair_dict[mention_pair.pair_id(by_what=by_what)]
-#                 if exist_pair.fixed_label in (None, 0) and mention_pair.label(cross_document=cross_document) ==1:
-#                     exist_pair.fixed_label = 1
-#             else:
-#                 mention_pair_dict[mention_pair.pair_id(by_what=by_what)] = mention_pair
-#                 mention_pair.fixed_label = mention_pair.label(cross_document=cross_document)
-#
-#         mentions_all = []  # 所有mention
-#         mentions_by_topic = {}  # 每个topic中的mention
-#         mentions_by_document = {}  # 每个文档中的mention
-#         # 搜出所有mention
-#         for topic_id in topics_list:
-#             try:
-#                 topic: EcbTopic = self.ECBPLUS.document_view.topics_dict[topic_id]
-#             except KeyError:
-#                 print("no topic %s" % topic_id)
-#                 continue
-#             mentions_by_topic[topic_id] = []
-#             for document in topic.documents_dict.values():
-#                 document: EcbDocument = document
-#                 mentions_by_document[document.document_name] = []
-#                 # 筛选文档中的mention
-#                 if prefix_list:
-#                     mentions_in_doc = [comp for comp in document.components_dict.values() if
-#                                        comp.tag.startswith(tuple(prefix_list))]
-#                 else:
-#                     mentions_in_doc = [comp for comp in document.components_dict.values()]
-#                 mentions_by_document[document.document_name] = mentions_in_doc
-#                 mentions_by_topic[topic_id] += mentions_in_doc
-#                 mentions_all += mentions_in_doc
-#
-#         # 生成mention pair
-#         if cross_topic:  # 跨document，跨topic
-#             for m1, m2 in tqdm(product(mentions_all, repeat=2), desc="Generate mention-pair [cross topic]:"):
-#                 add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
-#         elif cross_document:  # 跨document，不跨topic
-#             for mentions_in_topic in tqdm(mentions_by_topic.values(), desc="Generate mention-pair [cross document]:"):
-#                 for m1, m2 in product(mentions_in_topic, repeat=2):
-#                     add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
-#         else:  # document内
-#             for mentions_in_doc in tqdm(mentions_by_document.values(), desc="Generate mention-pair [within document]:"):
-#                 for m1, m2 in product(mentions_in_doc, repeat=2):
-#                     add_mention_pair(m1, m2, mention_pair_dict, ignore_order=ignore_order, by_what=by_what)
-#         result = list(mention_pair_dict.values())
-#
-#         # 扩增正例
-#         if positive_increase > 0:
-#             positive_samples = [pair for pair in result if pair.label(cross_document=cross_document)]
-#             result += positive_samples * positive_increase
-#
-#         result = np.array(result)
-#         # shuffle
-#         if shuffle:
-#             np.random.shuffle(result)
-#         return result
-#
-#     def BERT_MRPC_feature(
-#             self,
-#             topics: str = "all",
-#             cross_document: bool = True,
-#             cross_topic: bool = True,
-#             positive_increase: int=0,
-#             shuffle: bool=True,
-#             csv_path: str="",
-#             to_csv: bool=True) -> DataFrame:
-#         mention_pair_array: np.array = self.generate_mention_pairs(
-#             topics=topics, cross_document=cross_document, cross_topic=cross_topic, prefix_list=["ACTION", "NEG_ACTION"],
-#             ignore_order=True, positive_increase=positive_increase, shuffle=shuffle, by_what="sentence")
-#         # table = DataFrame(columns=["Quality", "#1 ID", "#2 ID", "#1 String", "#2 String"])
-#         # for pair in mention_pair_array:
-#         #     pair: MentionPair = pair
-#         #     if table.empty \
-#         #             or pair.pair_id(by_what="sentence") not in table.index \
-#         #             or table.loc[pair.pair_id(by_what="sentence"), "Quality"] == 0 and pair.label(cross_document=cross_document)==1:
-#         #         new_data = Series({
-#         #             "Quality": pair.label(cross_document=cross_document),
-#         #             "#1 ID": pair.component_pair[0].sentence.sid(),
-#         #             "#2 ID": pair.component_pair[1].sentence.sid(),
-#         #             "#1 String": pair.component_pair[0].sentence.text(),
-#         #             "#2 String": pair.component_pair[1].sentence.text(),
-#         #         })
-#         #         table.loc[pair.pair_id(by_what="sentence"), :] = new_data
-#         table = DataFrame()
-#         table["Quality"] = Series([pair.fixed_label for pair in mention_pair_array])
-#         table["#1 ID"] = Series([pair.component_pair[0].sentence.sid() for pair in mention_pair_array])
-#         table["#2 ID"] = Series([pair.component_pair[1].sentence.sid() for pair in mention_pair_array])
-#         table["#1 String"] = Series([pair.component_pair[0].sentence.text() for pair in mention_pair_array])
-#         table["#2 String"] = Series([pair.component_pair[1].sentence.text() for pair in mention_pair_array])
-#         if to_csv:
-#             table.to_csv(csv_path, sep="\t", index=False)
-#         return table
-#
-#     def generate_sentence_pair(
-#             self,
-#             topics: list or str="all",
-#             selected: bool = True,
-#             cross_document: bool=True,
-#             cross_topic: bool=True,
-#             ignore_order: bool=True):
-#
-#         topics_list = list(self.ECBPLUS.document_view.topics_dict.keys()) if topics == "all" else topics[:]
-#         sentences_all = []
-#         sentences_by_topic = dict()
-#         sentences_by_document = dict()
-#         # 搜出所有sentence
-#         for topic_id in topics_list:
-#             try:
-#                 topic: EcbTopic = self.ECBPLUS.document_view.topics_dict[topic_id]
-#             except KeyError:
-#                 print("no topic %s" % topic_id)
-#                 continue
-#             sentences_by_topic[topic_id] = []
-#             for document in topic.documents_dict.values():
-#                 document: EcbDocument = document
-#                 if selected:
-#                     sentences_in_doc = [s for s in document.all_sentences_dict.values() if s.selected]
-#                 else:
-#                     sentences_in_doc = [s for s in document.all_sentences_dict.values()]
-#                 sentences_by_document[document.document_name] = sentences_in_doc
-#                 sentences_by_topic[topic_id] += sentences_in_doc
-#                 sentences_all += sentences_in_doc
-#
-#         sentences_pairs = []
-#         if cross_topic:  # 跨document，跨topic
-#             pairs = combinations(sentences_all, r=2) if ignore_order else product(sentences_all, repeat=2)
-#             for s1, s2 in tqdm(pairs, desc="Generate sentence-pair [cross topic]:"):
-#                 sentences_pairs.append((s1, s2))
-#         elif cross_document:  # 跨document，不跨topic
-#             for mentions_in_topic in tqdm(sentences_by_topic.values(), desc="Generate sentence-pair [cross document]:"):
-#                 pairs = combinations(mentions_in_topic, r=2) if ignore_order else product(mentions_in_topic, repeat=2)
-#                 for s1, s2 in pairs:
-#                     sentences_pairs.append((s1, s2))
-#         else:  # document内
-#             for mentions_in_doc in tqdm(sentences_by_document.values(), desc="Generate sentence-pair [within document]:"):
-#                 pairs = combinations(mentions_in_doc, r=2) if ignore_order else product(mentions_in_doc, repeat=2)
-#                 for s1, s2 in pairs:
-#                     sentences_pairs.append((s1, s2))
-#         return sentences_pairs
-#
-#     def argument_feature(
-#             self,
-#             topics: str = "all",
-#             cross_document: bool = True,
-#             cross_topic: bool = True,
-#             positive_increase: int=0,
-#             shuffle: bool=True,
-#             csv_path: str="",
-#             to_csv: bool=True) -> DataFrame:
-#         sentences_pairs = self.generate_sentence_pair(
-#             topics=topics, selected=True, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True)
-#         sentences_set = set(chain.from_iterable(sentences_pairs))
-#         sentences_instances = dict()
-#         # 生成每个句子的每类Argument集合
-#         for sentence in tqdm(sentences_set, desc="collecting arguments"):
-#             sentence: EcbSentence = sentence
-#             sentences_instances[sentence] = defaultdict(set)
-#             # 添加每个子类component的集合
-#             for component in sentence.components_dict.values():
-#                 component: EcbComponent = component
-#                 if component.tag.startswith("'UNKNOWN"):
-#                     continue
-#                 instance = component.instance_global if cross_document else component.instance_within
-#                 sentences_instances[sentence][component.tag].add(instance)
-#             # 添加time，loc，human_participate,non_human_prticipate,action,neg_action的集合
-#             actions = set()
-#             neg_actions = set()
-#             times = set()
-#             locations = set()
-#             human_participates = set()
-#             non_human_participates = set()
-#             for sub_tag, instances_set in sentences_instances[sentence].items():
-#                 if sub_tag.startswith("ACTION"):
-#                     actions.update(instances_set)
-#                 elif sub_tag.startswith("NEG_ACTION"):
-#                     neg_actions.update(instances_set)
-#                 elif sub_tag.startswith("TIME"):
-#                     times.update(instances_set)
-#                 elif sub_tag.startswith("LOC"):
-#                     locations.update(instances_set)
-#                 elif sub_tag.startswith("HUMAN"):
-#                     human_participates.update(instances_set)
-#                 elif sub_tag.startswith("NON_HUMAN"):
-#                     non_human_participates.update(instances_set)
-#                 else:
-#                     raise KeyError(f"{sub_tag} is an illegal component tag")
-#             sentences_instances[sentence]["ACTION"].update(actions)
-#             sentences_instances[sentence]["NEG_ACTION"].update(neg_actions)
-#             sentences_instances[sentence]["TIME"].update(times)
-#             sentences_instances[sentence]["LOC"].update(locations)
-#             sentences_instances[sentence]["HUMAN"].update(human_participates)
-#             sentences_instances[sentence]["NON_HUMAN"].update(non_human_participates)
-#
-#             sentences_instances[sentence]["ACTION_and_NEG_ACTION"].update(actions | neg_actions)
-#             sentences_instances[sentence]["HUMAN_and_NON_HUMAN"].update(human_participates | non_human_participates)
-#             sentences_instances[sentence]["Arguments"].update(times | locations | human_participates | non_human_participates)
-#
-#         df_arg_feature = DataFrame(columns=["Quality", "#1 ID", "#2 ID", "#1 String", "#2 String"])
-#         for s1, s2 in tqdm(sentences_pairs, desc="generate records"):
-#             s1: EcbSentence = s1
-#             s2: EcbSentence = s2
-#             if s1.text() == s2.text():
-#                 continue
-#             record = Series({"#1 ID":s1.sid(), "#2 ID":s2.sid(), "#1 String":s1.text(), "#2 String": s2.text()})
-#             record["Quality"] = int((sentences_instances[s1]["ACTION_and_NEG_ACTION"] & sentences_instances[s2]["ACTION_and_NEG_ACTION"]) != set())
-#             df_arg_feature = df_arg_feature.append(record, ignore_index=True)
-#         return df_arg_feature
+
+def trigger_argument_distance(trigger: EcbComponent, argument: EcbComponent):
+    # argument 到 trigger 的最短距离
+    if trigger.tokens_list[0].tid <= argument.tokens_list[0].tid <= trigger.tokens_list[-1].tid \
+            or argument.tokens_list[0].tid <= trigger.tokens_list[0].tid <= argument.tokens_list[-1].tid:
+        return 0
+    else:
+        return min(
+            abs(trigger.tokens_list[0].tid - argument.tokens_list[0].tid),
+            abs(trigger.tokens_list[0].tid - argument.tokens_list[-1].tid),
+            abs(trigger.tokens_list[-1].tid - argument.tokens_list[0].tid),
+            abs(trigger.tokens_list[-1].tid - argument.tokens_list[-1].tid),
+        )
+
+def normalize_edge_weight(distance: int):
+    return log(1 + 1/(0.1 + distance))  # log normalize, 距离越远越不重要，0.1防止分母为0
+
+
+def gnn_graph(m1: EcbComponent, m2: EcbComponent, cross_document: bool):
+    tags = {
+        'ACTION_ASPECTUAL', 'ACTION_CAUSATIVE', 'ACTION_GENERIC', 'ACTION_OCCURRENCE', 'ACTION_PERCEPTION',
+    'ACTION_REPORTING', 'ACTION_STATE',
+        'NEG_ACTION_ASPECTUAL', 'NEG_ACTION_CAUSATIVE', 'NEG_ACTION_GENERIC', 'NEG_ACTION_OCCURRENCE',
+    'NEG_ACTION_PERCEPTION', 'NEG_ACTION_REPORTING', 'NEG_ACTION_STATE',
+        'TIME_DATE', 'TIME_DURATION', 'TIME_OF_THE_DAY', 'TIME_REPETITION',
+        'LOC_FAC', 'LOC_GEO', 'LOC_OTHER',
+        'HUMAN_PART', 'HUMAN_PART_FAC', 'HUMAN_PART_GENERIC', 'HUMAN_PART_GPE', 'HUMAN_PART_MET', 'HUMAN_PART_ORG',
+    'HUMAN_PART_PER', 'HUMAN_PART_VEH',
+        'NON_HUMAN_PART', 'NON_HUMAN_PART_GENERIC',
+        'UNKNOWN_INSTANCE_TAG'
+        'TIME',
+        'LOC',
+        'HUMAN',
+        'NON_HUMAN',
+        'ACTION',
+        'NEG_ACTION',
+        ('ACTION', 'NEG_ACTION',),
+        ('HUMAN', 'NON_HUMAN',),
+        ('TIME', 'LOC', 'HUMAN', 'NON_HUMAN',)
+    }
+    # 计算每个句子中Argument到trigger的距离
+    G = nx.Graph()
+    for trigger in (m1, m2):
+        # 计算argument到trigger的最短距离。注意，argument是EcbInstance不是EcbComponent，但trigger都是EcbComponent
+        argument_distance_dict = defaultdict(lambda: 10000)
+        G.add_node(trigger)
+        for component in trigger.sentence.components_dict.values():
+            if component.tag.startswith(("ACTION", "NEG_ACTION", 'UNKNOWN')):
+                continue
+            # 计算距离
+            argument = component.instance_global if cross_document else component.instance_within
+            argument_distance_dict[argument] = min(argument_distance_dict[argument],
+                                                   trigger_argument_distance(trigger, component))
+            # 计算feature
+            feature_dict = dict()
+            for tag in tags:
+                feature_dict[tag] = argument.tag.startswith(tag)
+        # 添加边
+        for argument, distance in argument_distance_dict.items():
+            G.add_edge(trigger, argument, weight=normalize_edge_weight(distance))
+    # 添加每个点的feature
+    feature_for_each_node = dict()
+    for node in G.nodes:
+        feature_dict = dict()
+        for tag in tags:
+            feature_dict[tag] = int(node.tag.startswith(tag))
+        feature_for_each_node[node] = [feature_dict[tag] for tag in tags]  # 保证每个点feature顺序一致
+    nx.set_node_attributes(G, name="feature", values=feature_for_each_node)  # 批量为每个点添加feature
+    return G
+
+
+def convert_mention_pair_to_GNN_features(mention_pair: MentionPair, cross_document: bool):
+    G = gnn_graph(m1=mention_pair.mention_pair[0], m2=mention_pair.mention_pair[1], cross_document=cross_document)
+    # GNN feature
+    node_id = dict()
+    for index, node in enumerate(G.nodes):
+        node_id[node] = index
+    edges = []
+    weights = []
+    for f, t in G.edges:
+        edges.append([node_id[f], node_id[t]])
+        edges.append([node_id[t], node_id[f]])
+        weights.append(G[f][t]["weight"])
+        weights.append(G[f][t]["weight"])
+
+    x = torch.tensor([G.node[node]["feature"] for node in G.nodes], dtype=torch.float)
+    try:
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    except RuntimeError:
+        edge_index = torch.tensor([[],[]], dtype=torch.long)  # 没有边时，放一个空张量
+    edge_weight = torch.tensor(weights, dtype=torch.float)
+    y = torch.tensor([mention_pair.label(cross_document=cross_document)], dtype=torch.long)
+    trigger_mask = torch.tensor([[int(isinstance(node, EcbComponent))] for node in G.nodes], dtype=torch.long)
+    data = GnnData(x=x, edge_index=edge_index, y=y)
+    data.edge_weight = edge_weight
+    data.trigger_mask = trigger_mask
+    return data
+
+
+def draw_argument_graph(G: nx.Graph):
+    node_labels = {}
+    trigger_nodes, argument_nodes = [], []
+    for node in G.nodes:
+        if isinstance(node, EcbComponent):  # trigger
+            node_labels[node] = node.text
+            trigger_nodes.append(node)
+        elif isinstance(node, EcbInstance):  # argument
+            node_labels[node] = node.mentions_list[0].text
+            argument_nodes.append(node)
+    limits = plt.axis('off')  # 不显示坐标
+    layout = nx.spring_layout(G)  # 生成图的布局
+    nx.draw_networkx_nodes(G, layout, nodelist=trigger_nodes, node_color="b", node_size=900)  # 绘制两个trigger的点，画成蓝色蓝色
+    nx.draw_networkx_nodes(G, layout, nodelist=argument_nodes, node_color="r") # 画出其他argument点，画成红色
+    nx.draw_networkx_labels(G, layout, labels=node_labels)  # 绘制点的标签
+    for f, t in G.edges:  # 绘制边。每次画一个边，用粗细表示权重
+        nx.draw_networkx_edges(G, layout, edgelist=[(f, t)], width=G[f][t]["weight"] * 10)
+    edge_labels = {(f, t): round(G[f][t]["weight"], 2) for f, t in G.edges}
+    # nx.draw_networkx_edge_labels(G, layout, edge_labels=edge_labels)  # 绘制边的标签
+    plt.show()
+    plt.clf()
+    limits = plt.axis('on')
