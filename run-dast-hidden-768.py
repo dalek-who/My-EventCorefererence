@@ -1,27 +1,30 @@
 import os
 
-CUDA_VISIBLE_DEVICES = "1,2,3"
+CUDA_VISIBLE_DEVICES = "3"
 script = "main.py"
-log_name = "log_run.txt"
+log_name = "log_run-dast-hidden-768.txt"
 
 
 args_value = {
     # 会调整的
-    "--description": "DAST_cross-document_batch-123_epoch-3_sentence-and-trigger_no-hidden-layer_half-window-3_increase-positive-3",
+    "--description": "DAST-ALL_cross-document_epoch-3_hidden-768-layer_increase-positive-3_half-window-3_lr-5e-5",
     "--coref_level": "cross_document",  # "cross_document", "within_document", "cross_topic"
     "--learning_rate": 5e-5,
     "--max_seq_length": 123,
-    "--batch_size": 180,
-    "--num_train_epochs": 3.0,
+    "--train_batch_size": 30,
+    "--eval_batch_size": 100,
+    "--num_train_epochs": 3,
     "--increase_positive": 3,
     "--trigger_half_window": 3,
 
     # 各种目录
     "--load_model_dir": "",
     "--train_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_model/SentenceTrigger_half-window-3_no-hidden-layer_cross-document_increase-positive-3",
+        # "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_model/demo",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_model/DAST_hidden-layer-768_cross-document_increase-positive-3_epoch-3_lr-5e-5_half-window-3",
     "--predict_output_dir":
-        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_predict/SentenceTrigger_half-window-3_no-hidden-layer_cross-document_increase-positive-3",
+        # "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_predict/demo",
+        "/users/wangyuanzheng/event_coreference/my-ev-coref/middle_data/DAST_predict/DAST_hidden-layer-768_cross-document_increase-positive-3_epoch-3_lr-5e-5_half-window-3",
 
     # 基本不变的
     "--bert_model": "bert-base-uncased",
@@ -40,15 +43,15 @@ args_store_true = {
     "--load_trained": False,
     "--draw_visdom": False,
 
-    "--use_document_feature": False,
+    "--use_document_feature": True,
     "--use_sentence_trigger_feature": True,
-    "--use_argument_feature": False,
+    "--use_argument_feature": True,
 
 
     # 使用默认值
     "--do_lower_case": True,
     "--no_cuda": False,
-    "--fp16": True,
+    "--fp16": False,
 }
 
 cmd_args = " ".join(["%s %s" % (k,v) for k,v in args_value.items() if v!=""]) + " " \
@@ -57,3 +60,4 @@ cmd_args = " ".join(["%s %s" % (k,v) for k,v in args_value.items() if v!=""]) + 
 command = f"""CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES} python {script} {cmd_args} >{log_name} 2>&1 &"""
 print(command)
 os.system(command)
+

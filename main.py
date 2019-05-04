@@ -56,6 +56,7 @@ from utils.ExperimentRecordManager import generate_record, get_time_stamp, Visdo
 from utils.coref_eval import evaluate_coref_from_example
 from models.clustering import connected_components_clustering, examples_to_predict_frame
 from utils.DrawMetricsPicture import result_visualize
+from utils.DrawClusterPicture import draw_cluster_graph
 
 # 新加的
 from preprocessing.Structurize.EcbClass import EcbPlusTopView
@@ -150,9 +151,11 @@ def create_model_input_loader(feature_list: list, batch_size):
     return BERT_dataloader, GNN_dataloader
 
 
-def do_train(model, optimizer, warmup_linear, device, BERT_dataloader, GNN_dataloader, feature_list: list, n_gpu: int, fp16: bool,
-             visdom_helper: EasyVisdom, num_train_optimization_steps: int, warmup_proportion: float,
-             learning_rate: float, loss_each_step: dict, learning_rate_each_step: dict):
+def do_train(
+        model, optimizer, warmup_linear, device, BERT_dataloader, GNN_dataloader, feature_list: list, n_gpu: int,
+        fp16: bool,visdom_helper: EasyVisdom, num_train_optimization_steps: int, warmup_proportion: float,
+        learning_rate: float, loss_each_step: dict, learning_rate_each_step: dict,
+        use_document_feature: bool, use_sentence_trigger_feature: bool, use_argument_feature: bool, cross_document: bool):
     if model is not None:
         model.train()
     global train_global_step
@@ -166,9 +169,12 @@ def do_train(model, optimizer, warmup_linear, device, BERT_dataloader, GNN_datal
         GNN_batch.to(device, *('x', 'edge_index', 'edge_weight', 'trigger_mask', 'y'))
         GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask, GNN_labels = \
             GNN_batch.x, GNN_batch.edge_index, GNN_batch.edge_weight, GNN_batch.trigger_mask, GNN_batch.y
-        logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
-                       tfidf,
-                       GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask)
+        logits = model(
+            device,
+            BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
+            tfidf,
+            GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask,
+            use_document_feature, use_sentence_trigger_feature, use_argument_feature, cross_document)
 
         loss_fct = CrossEntropyLoss()
         loss = loss_fct(logits.view(-1, 2), labels.view(-1))
@@ -206,7 +212,8 @@ def do_train(model, optimizer, warmup_linear, device, BERT_dataloader, GNN_datal
             train_loss=loss_each_step[train_global_step], learning_rate=learning_rate_each_step[train_global_step])
 
 
-def do_eval(model, device, BERT_dataloader, GNN_dataloader, feature_list: list):
+def do_eval(model, device, BERT_dataloader, GNN_dataloader, feature_list: list,
+            use_document_feature: bool, use_sentence_trigger_feature: bool, use_argument_feature: bool, cross_document: bool):
     if model is not None:
         model.eval()
 
@@ -222,9 +229,12 @@ def do_eval(model, device, BERT_dataloader, GNN_dataloader, feature_list: list):
         GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask, GNN_labels = \
             GNN_batch.x, GNN_batch.edge_index, GNN_batch.edge_weight, GNN_batch.trigger_mask, GNN_batch.y
         with torch.no_grad():
-            logits = model(BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
-                           tfidf,
-                           GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask)
+            logits = model(
+                device,
+                BERT_input_ids, BERT_segment_ids, BERT_input_mask, BERT_trigger_mask_a, BERT_trigger_mask_b,
+                tfidf,
+                GNN_x, GNN_edge_index, GNN_edge_weight, GNN_trigger_mask,
+                use_document_feature, use_sentence_trigger_feature, use_argument_feature, cross_document)
 
         # create eval loss and other metric required by the task
         loss_fct = CrossEntropyLoss()
@@ -387,10 +397,14 @@ def my_main():
     parser.add_argument("--do_lower_case",
                         action='store_true',
                         help="Set this flag if you are using an uncased model.")
-    parser.add_argument("--batch_size",
+    parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
                         help="Total batch size for training.")
+    parser.add_argument("--eval_batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for evaluation.")
     parser.add_argument("--learning_rate",
                         default=5e-5,
                         type=float,
@@ -464,8 +478,8 @@ def my_main():
     # 运算设备
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     n_gpu = torch.cuda.device_count()
-    logger.info("device: {} n_gpu: {}, 16-bits training: {}".format(
-        device, n_gpu, args.fp16))
+    logger.info("device: {} n_gpu: {}, 16-bits training: {}".format(device, n_gpu, args.fp16))
+
 
     # 随机种子。如果每次设定的随机种子一样，则随机数的序列也一样
     random.seed(args.seed)
@@ -488,6 +502,31 @@ def my_main():
     if not os.path.exists(args.predict_output_dir):
         os.makedirs(args.predict_output_dir)
 
+    # 准备模型, 先准备模型后准备数据，防止花很长时间与处理数据后模型却是NoneType
+    cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_-1')
+    # if args.use_sentence_trigger_feature and not args.use_document_feature and not args.use_argument_feature:
+    #     ModelClass = DAST_SentenceTrigger
+    # elif not args.use_sentence_trigger_feature and not args.use_document_feature and args.use_argument_feature:
+    #     ModelClass = DAST_Argument
+    # else:
+    #     ModelClass = None
+    ModelClass = DAST
+
+    if ModelClass is not None and not args.load_trained:
+        model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
+    elif ModelClass is not None and args.load_trained:
+        model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
+    else:
+        model = None
+        raise ModuleNotFoundError("Please choose a model")
+
+    if args.fp16:
+        model.half()
+    model.to(device)
+    if n_gpu > 1:
+        model = torch.nn.DataParallel(model)
+
+
 
     # 是否跨文档，是否跨主题
     if args.coref_level == "within_document":
@@ -507,55 +546,45 @@ def my_main():
         ECBplus = EcbPlusTopView()
         ECBplus.dump()
     feature_creator = InputFeaturesCreator(ECBPlus=ECBplus)
-    logger.info("*******  Create eval features  ******")
-    dev_features = feature_creator.create_from_dataset(
-        topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
-        max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+    try:
+        dev_features = feature_creator.load(
+            topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+            max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+        logger.info("*******  Load eval features cache ******")
+    except:
+        logger.info("*******  Create eval features  ******")
+        dev_features = feature_creator.create_from_dataset(
+            topics=CONFIG.topics_test, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+            max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
     dataset_statistics_dict["dev"] = input_feature_statistics(dev_features)
 
     num_train_optimization_steps = 0
     train_features = []
     if args.do_train:
-        logger.info("*******  Create train features  ******")
-        train_features = feature_creator.create_from_dataset(
-            topics=CONFIG.topics_train, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
-            max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+        try:
+            train_features = feature_creator.load(
+                topics=CONFIG.topics_train, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+                max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
+            logger.info("*******  Load train features cache ******")
+        except:
+            logger.info("*******  Create train features  ******")
+            train_features = feature_creator.create_from_dataset(
+                topics=CONFIG.topics_train, cross_document=cross_document, cross_topic=cross_topic, ignore_order=True,
+                max_seq_length=args.max_seq_length, trigger_half_window=args.trigger_half_window)
         dataset_statistics_dict["train"] = input_feature_statistics(train_features)
         dataset_statistics_dict["train"]["positive_increase"] = args.increase_positive
-        # num_train_optimization_steps = int(len(train_features) / args.batch_size) * args.num_train_epochs
         if args.increase_positive >= 1:  # 扩增正例
             train_features = dataset_increase(examples=train_features, more=args.increase_positive, label=1)
         train_features = dataset_shuffle(train_features)
-        num_train_optimization_steps = ceil(len(train_features) / args.batch_size) * args.num_train_epochs
+        num_train_optimization_steps = ceil(len(train_features) / args.train_batch_size) * args.num_train_epochs
 
-    # 准备模型
-    cache_dir = args.cache_dir if args.cache_dir else os.path.join(str(PYTORCH_PRETRAINED_BERT_CACHE), 'distributed_-1')
-    if args.use_sentence_trigger_feature and not args.use_document_feature and not args.use_argument_feature:
-        ModelClass = DAST_SentenceTrigger
-    elif not args.use_sentence_trigger_feature and not args.use_document_feature and args.use_argument_feature:
-        ModelClass = DAST_Argument
-    else:
-        ModelClass = None
-
-    if ModelClass is not None and not args.load_trained:
-        model = ModelClass.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=2)
-    elif ModelClass is not None and args.load_trained:
-        model = load_model_from_checkpoint(load_checkpoint_dir=args.load_model_dir, num_labels=2, ModelClass=ModelClass)
-    else:
-        model = None
-        # raise ModuleNotFoundError("Please choose a model")  # todo
-
-    if args.fp16:
-        model.half()
-    model.to(device)  # todo
-    if n_gpu > 1:
-        model = torch.nn.DataParallel(model)
 
     # 准备绘图
     time_stamp = get_time_stamp()
     visdom_helper = EasyVisdom(env_name=f"DAST env: %s %s " % (time_stamp, args.description), enable=args.draw_visdom)
 
-    dev_BERT_dataloader, dev_GNN_dataloader = create_model_input_loader(feature_list=dev_features, batch_size=args.batch_size)
+    eval_BERT_dataloader_dev, eval_GNN_dataloader_dev = create_model_input_loader(feature_list=dev_features, batch_size=args.eval_batch_size)
+    eval_BERT_dataloader_train, eval_GNN_dataloader_train = create_model_input_loader(feature_list=train_features, batch_size=args.eval_batch_size)
     visdom_helper.show_dict(title_name="Command Line Arguments", dic=vars(args))
     visdom_helper.show_dict(title_name="Eval Data Statistics", dic=input_feature_statistics(dev_features))
     if args.do_train:
@@ -564,12 +593,12 @@ def my_main():
             model, fp16=args.fp16, loss_scale=args.loss_scale, learning_rate=args.learning_rate,
             warmup_proportion=args.warmup_proportion, num_train_optimization_steps=num_train_optimization_steps)
         # train数据
-        train_BERT_dataloader, train_GNN_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.batch_size)
+        train_BERT_dataloader, train_GNN_dataloader = create_model_input_loader(feature_list=train_features, batch_size=args.train_batch_size)
         visdom_helper.show_dict(title_name="Train Data Statistics", dic=input_feature_statistics(train_features))
 
 
         global train_global_step
-        compare_dict = {"best_result": -1, "best_epoch": -1, "best_global_step": -1}
+        compare_dict = {"best_result": -2, "best_epoch": -2, "best_global_step": -2}
         train_curve_datas = {
             "train_loss_each_step": dict(),
             "learning_rate_each_step": dict(),
@@ -578,12 +607,24 @@ def my_main():
         }
 
         # 训练开始前先eval一次
-        train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=train_BERT_dataloader,
-                                           GNN_dataloader=train_GNN_dataloader, feature_list=train_features)
-        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
-                                         GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
+        train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=eval_BERT_dataloader_train,
+                                           GNN_dataloader=eval_GNN_dataloader_train, feature_list=train_features,
+                                           use_argument_feature=args.use_argument_feature,
+                                           use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                                           use_document_feature=args.use_document_feature,
+                                           cross_document=cross_document)
+
+        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=eval_BERT_dataloader_dev,
+                                         GNN_dataloader=eval_GNN_dataloader_dev, feature_list=dev_features,
+                                         use_argument_feature=args.use_argument_feature,
+                                         use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                                         use_document_feature=args.use_document_feature,
+                                         cross_document=cross_document)
         train_curve_datas["eval_result_each_epoch_on_train"][0] = train_result
         train_curve_datas["eval_result_each_epoch_on_dev"][0] = eval_result
+        compare_with_checkpoint(
+            model=model, output_checkpoint_dir=args.train_output_dir, logger=logger, compare_dict=compare_dict,
+            eval_result=eval_result, epoch=0, global_step=0, by_what=CONFIG.CHECKPOINT_BY_WHAT)
         draw_visdom_each_epoch(visdom_helper=visdom_helper, epoch=0, train_result=train_result, eval_result=eval_result)
         # 训练
         for epoch in trange(1, int(args.num_train_epochs)+1, desc="Epoch"):
@@ -593,11 +634,23 @@ def my_main():
                 feature_list=train_features, n_gpu=n_gpu, fp16=args.fp16, visdom_helper=visdom_helper,
                 num_train_optimization_steps=num_train_optimization_steps, warmup_proportion=args.warmup_proportion,
                 learning_rate=args.learning_rate, loss_each_step=train_curve_datas["train_loss_each_step"],
-                learning_rate_each_step=train_curve_datas["learning_rate_each_step"])
-            train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=train_BERT_dataloader,
-                                               GNN_dataloader=train_GNN_dataloader, feature_list=train_features)
-            eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
-                                             GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
+                learning_rate_each_step=train_curve_datas["learning_rate_each_step"],
+                use_argument_feature=args.use_argument_feature,
+                use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                use_document_feature=args.use_document_feature,
+                cross_document=cross_document)
+            train_result, train_pred = do_eval(model=model, device=device, BERT_dataloader=eval_BERT_dataloader_train,
+                                               GNN_dataloader=eval_GNN_dataloader_train, feature_list=train_features,
+                                               use_argument_feature=args.use_argument_feature,
+                                               use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                                               use_document_feature=args.use_document_feature,
+                                               cross_document=cross_document)
+            eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=eval_BERT_dataloader_dev,
+                                             GNN_dataloader=eval_GNN_dataloader_dev, feature_list=dev_features,
+                                             use_argument_feature=args.use_argument_feature,
+                                             use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                                             use_document_feature=args.use_document_feature,
+                                             cross_document=cross_document)
             train_curve_datas["eval_result_each_epoch_on_train"][epoch] = train_result
             train_curve_datas["eval_result_each_epoch_on_dev"][epoch] = eval_result
             compare_with_checkpoint(
@@ -625,9 +678,14 @@ def my_main():
         model = load_model_from_checkpoint(load_checkpoint_dir=args.train_output_dir, num_labels=2, ModelClass=ModelClass)
 
     if args.do_predict_only:
-        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=dev_BERT_dataloader,
-                                         GNN_dataloader=dev_GNN_dataloader, feature_list=dev_features)
+        eval_result, eval_pred = do_eval(model=model, device=device, BERT_dataloader=eval_BERT_dataloader_dev,
+                                         GNN_dataloader=eval_GNN_dataloader_dev, feature_list=dev_features,
+                                         use_argument_feature=args.use_argument_feature,
+                                         use_sentence_trigger_feature=args.use_sentence_trigger_feature,
+                                         use_document_feature=args.use_document_feature,
+                                         cross_document=cross_document)
         visdom_helper.show_dict(title_name="Eval Result", dic=eval_result)
+        draw_cluster_graph(dev_features, eval_pred)
 
 
 if __name__ == "__main__":

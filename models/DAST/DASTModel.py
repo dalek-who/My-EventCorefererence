@@ -1,3 +1,8 @@
+import sys
+sys.path.append(".")
+sys.path.append("..")
+sys.path.append("../..")
+
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
@@ -6,6 +11,8 @@ from torch_geometric.nn import GCNConv
 
 
 from pytorch_pretrained_bert.modeling import BertModel, BertPreTrainedModel
+
+from configs import CONFIG
 
 
 class DAST_SentenceTrigger(BertPreTrainedModel):
@@ -84,10 +91,9 @@ class DAST_Argument(BertPreTrainedModel):
         super(DAST_Argument, self).__init__(config)
         self.num_labels = num_labels
         self.feature_size = 40
-        self.conv1_size = 16
         self.dropout1 = nn.Dropout(config.hidden_dropout_prob)
-        self.conv1 = GCNConv(self.feature_size, self.conv1_size)
-        self.classifier = nn.Linear(self.conv1_size*2, num_labels)
+        self.conv1 = GCNConv(self.feature_size, CONFIG.VERTEX_EMBEDDING_DIM)
+        self.classifier = nn.Linear(CONFIG.VERTEX_EMBEDDING_DIM*2, num_labels)
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b,
@@ -106,3 +112,85 @@ class DAST_Argument(BertPreTrainedModel):
         logits = self.classifier(trigger_nodes_embedding)
 
         return logits
+
+
+class DAST(BertPreTrainedModel):
+    def __init__(self, config, num_labels):
+        super(DAST, self).__init__(config)
+        # bert
+        self.num_labels = num_labels
+        self.bert = BertModel(config)
+        # gcn
+        self.feature_size = 40
+        self.conv1 = GCNConv(self.feature_size, CONFIG.VERTEX_EMBEDDING_DIM)
+
+        self.dropout1 = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout2 = nn.Dropout(config.hidden_dropout_prob)
+
+        if CONFIG.CLASSIFIER_HIDDEN_SIZE > 0:
+            self.final_hidden = nn.Linear(config.hidden_size*3 + CONFIG.TFIDF_PCA_DIM*2 + CONFIG.VERTEX_EMBEDDING_DIM*2,
+                                          CONFIG.CLASSIFIER_HIDDEN_SIZE)
+            self.classifier = nn.Linear(CONFIG.CLASSIFIER_HIDDEN_SIZE, num_labels)
+        else:
+            self.final_hidden = None
+            self.classifier = nn.Linear(config.hidden_size*3 + CONFIG.TFIDF_PCA_DIM*2 + CONFIG.VERTEX_EMBEDDING_DIM*2,
+                                        num_labels)
+        self.apply(self.init_bert_weights)
+
+
+    def forward(self,
+                device,
+                input_ids, token_type_ids, attention_mask, trigger_mask_a, trigger_mask_b,
+                tfidf,
+                x, edge_index, edge_weight, trigger_mask,
+                use_document_feature: bool=True,
+                use_sentence_trigger_feature: bool=True,
+                use_argument_feature: bool=True,
+                cross_document: bool=True
+                ):
+        # bert
+        if use_sentence_trigger_feature:
+            tokens_embedding, sentence_embedding = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
+            # 两个trigger的向量表示
+            new_trigger_mask_a = trigger_mask_a.unsqueeze(-1).expand_as(tokens_embedding).type_as(tokens_embedding)
+            trigger_embedding_a = new_trigger_mask_a.mul(tokens_embedding).mean(dim=1)  # shape: batch，token， embedding维度
+            new_trigger_mask_b = trigger_mask_b.unsqueeze(-1).expand_as(tokens_embedding).type_as(tokens_embedding)
+            trigger_embedding_b = new_trigger_mask_b.mul(tokens_embedding).mean(dim=1)  # shape: batch，token， embedding维度
+        else:
+            sentence_embedding = torch.zeros((input_ids.shape[0], CONFIG.BERT_EMBEDDING_SIZE)).to(device)
+            trigger_embedding_a = torch.zeros((input_ids.shape[0], CONFIG.BERT_EMBEDDING_SIZE)).to(device)
+            trigger_embedding_b = torch.zeros((input_ids.shape[0], CONFIG.BERT_EMBEDDING_SIZE)).to(device)
+
+
+        # tfidf
+        if use_document_feature and cross_document:
+            using_tfidf = tfidf
+        else:
+            using_tfidf = torch.zeros_like(tfidf).to(device)
+
+        # gcn
+        if use_argument_feature:
+            nodes_embedding = self.conv1(x, edge_index, edge_weight)
+            nodes_embedding = F.relu(nodes_embedding)
+            trigger_mask = trigger_mask.type(torch.uint8)
+            trigger_nodes_embedding = nodes_embedding.masked_select(trigger_mask)
+            trigger_nodes_embedding = trigger_nodes_embedding.view(-1, 2 * CONFIG.VERTEX_EMBEDDING_DIM)  # 2:一个样本里有两个trigger
+        else:
+            trigger_nodes_embedding = torch.zeros((input_ids.shape[0], 2 * CONFIG.VERTEX_EMBEDDING_DIM)).to(device)
+
+
+        # 组合为总的事件向量，分类
+        event_represent = torch.cat((sentence_embedding,
+                                     trigger_embedding_a, trigger_embedding_b,
+                                     using_tfidf,
+                                     trigger_nodes_embedding),
+                                    dim=1)
+        event_represent = self.dropout1(event_represent)
+        if CONFIG.CLASSIFIER_HIDDEN_SIZE > 0:
+            event_represent = self.final_hidden(event_represent)
+            event_represent = F.relu(event_represent)
+            event_represent = self.dropout2(event_represent)
+
+        logits = self.classifier(event_represent)
+        return logits
+

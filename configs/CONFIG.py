@@ -21,5 +21,8 @@ DATA_DIR = os.path.join(ECB_DRI, "ECB+/")
 CHECKPOINT_BY_WHAT = "CoNLL_f1"
 
 # 模型的一些超参数
-VECTOR_EMBEDDING_DIM = 16  # GNN中每个点embedding为几维
+VERTEX_EMBEDDING_DIM = 16  # GNN中每个点embedding为几维
 TFIDF_PCA_DIM = 100  # TFIDF用PCA压缩到几维
+CLASSIFIER_HIDDEN_SIZE = 768  # 最后的hidden layer多少维
+BERT_EMBEDDING_SIZE = 768  # BERT把每个点embedding到多少维
+

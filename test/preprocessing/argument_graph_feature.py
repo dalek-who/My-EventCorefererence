@@ -8,7 +8,7 @@ from torch_geometric.data import Data as GnnData
 
 
 #%%
-ecb = EcbPlusTopView()
+ecb = EcbPlusTopView.load()
 IFC = InputFeaturesCreator(ecb)
 
 topics = range(1,35)

@@ -72,7 +72,7 @@ def result_visualize(curve_data_dict: dict, output_dir):
     # 一张loss图，里面有train和dev两条线
     df = DataFrame()
     for which_set in ("train", "dev"):
-        df[which_set + "_" + which_line] = df_metrics[which_set]["eval_loss"]
+        df[which_set + "_" + "eval_loss"] = df_metrics[which_set]["eval_loss"]
     metrics_plot = df.plot(title="Loss of each epoch")
     metrics_plot.set_xlabel("Epoch")
     metrics_plot.set_ylabel("Loss")
@@ -102,4 +102,4 @@ def result_visualize(curve_data_dict: dict, output_dir):
     ]
     dev_metrics_in_table = df_metrics["dev"].loc[df_metrics["dev"][metrics_use] == max(df_metrics["dev"][metrics_use]),
                                                  column_in_table].head(1)
-    dev_metrics_in_table.to_csv(os.path.join(output_dir, "./visualize/best_result.tsv"), index=False)
+    dev_metrics_in_table.to_csv(os.path.join(output_dir, "./visualize/best_result.csv"), index=False)

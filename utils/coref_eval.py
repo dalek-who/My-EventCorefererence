@@ -23,7 +23,7 @@ def evaluate_coref_from_example(example: list, pred):
 
     # 计算coref指标
     coref_eval = dict()
-    for metrics_name, metrics_func in zip(["MUC", "B-cubed", "CEAFm", "CEAFe", "BLANCc", "BLANCn"],
+    for metrics_name, metrics_func in zip(["MUC", "B-cubed", "CEAFe", "CEAFm", "BLANCc", "BLANCn"],
                                           [b_cubed, muc, entity_ceaf, mention_ceaf, pairwise, pairwise_negative]):
         p, r, f1 = _prf(*metrics_func(clusters_turth, clusters_pred))
         coref_eval[metrics_name + "_p"] = p

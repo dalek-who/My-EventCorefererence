@@ -153,16 +153,37 @@ class InputFeaturesCreator(object):
     def __init__(self, ECBPlus: EcbPlusTopView):
         self.ecb = ECBPlus
 
-    # def load(self,
-    #          cross_document: bool=True,
-    #          cross_topic: bool=False):
-    #     cross_document_str = "_cross_doc" if cross_document else "_within_doc"
-    #     cross_topic_str = "_cross_topic" if cross_topic else ""
-    #     file_name = "./feature_%s%s.pkl" % (cross_document_str, cross_topic_str)
-    #     path = os.path.join(os.path.dirname(__file__), file_name)
-    #     with open(path, "rb") as f:
-    #         features = pickle.load(f)
-    #     return features
+    def cache_path(
+            self,
+            topics: list or str="all",
+            cross_document: bool=True,
+            cross_topic: bool=False,
+            ignore_order: bool=True,
+            max_seq_length: int=123,
+            trigger_half_window: int=1
+    ):
+        file_name = f"cross_document_%s--cross_topic_%s--ignore_order_%s--max_seq_length_%s--trigger_half_window_%s--topic_%s.pkl" % \
+                    (cross_document, cross_topic, ignore_order, max_seq_length, trigger_half_window, topics)
+        cache_dir = os.path.join(os.path.dirname(__file__), "./feature_cache/")
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        return os.path.join(cache_dir, file_name)
+
+
+    def load(
+            self,
+            topics: list or str="all",
+            cross_document: bool=True,
+            cross_topic: bool=False,
+            ignore_order: bool=True,
+            max_seq_length: int=123,
+            trigger_half_window: int=1
+    ):
+        cache_path = self.cache_path(topics, cross_document, cross_topic, ignore_order, max_seq_length, trigger_half_window)
+        with open(cache_path, "rb") as f:
+            features = pickle.load(f)
+        return features
+
 
     def create_from_dataset(
             self,
@@ -193,15 +214,12 @@ class InputFeaturesCreator(object):
                 trigger_mask_b=trigger_mask_b,
                 tf_idf_a=pair.mention_pair[0].sentence.document.tfidf,
                 tf_idf_b=pair.mention_pair[1].sentence.document.tfidf,
-                gnn_data = gnn_data
+                gnn_data=gnn_data
             )
             features.append(feature)
 
-        cross_document_str = "_cross_doc" if cross_document else "_within_doc"
-        cross_topic_str = "_cross_topic" if cross_topic else ""
-        file_name = "./feature_%s%s.pkl" % (cross_document_str, cross_topic_str)
-        path = os.path.join(os.path.dirname(__file__), file_name)
-        with open(path, "wb") as f:
+        cache_path = self.cache_path(topics, cross_document, cross_topic, ignore_order, max_seq_length, trigger_half_window)
+        with open(cache_path, "wb") as f:
             pickle.dump(features, f)
         return features
 
